@@ -26,11 +26,16 @@ setup_whisper_cpp() {
     fi
 
     echo "whisper.cpp をビルド中 (Apple Silicon 最適化)..."
-    # Apple Silicon向けに最適化してビルド
-    make clean 2>/dev/null || true
 
-    # mainとstreamの両方をビルド
-    WHISPER_COREML=1 make -j$(sysctl -n hw.ncpu) main stream
+    # ビルドディレクトリをクリーン
+    rm -rf build 2>/dev/null || true
+
+    # CMakeでビルド（Apple Silicon + Core ML最適化）
+    cmake -B build \
+        -DWHISPER_COREML=1 \
+        -DCMAKE_BUILD_TYPE=Release
+
+    cmake --build build -j$(sysctl -n hw.ncpu) --config Release
 
     echo "whisper.cpp のビルド完了!"
 }

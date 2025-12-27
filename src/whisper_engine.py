@@ -95,8 +95,16 @@ class WhisperEngine:
         if self.config.models_path is None:
             self.config.models_path = base_path / "models"
 
-        self._stream_binary = self.config.whisper_cpp_path / "stream"
-        self._main_binary = self.config.whisper_cpp_path / "main"
+        # CMakeビルド後のバイナリパス
+        build_bin = self.config.whisper_cpp_path / "build" / "bin"
+        self._stream_binary = build_bin / "whisper-stream"
+        self._main_binary = build_bin / "whisper-cli"
+
+        # フォールバック: 古いMakefileビルドのパス
+        if not self._main_binary.exists():
+            self._main_binary = self.config.whisper_cpp_path / "main"
+        if not self._stream_binary.exists():
+            self._stream_binary = self.config.whisper_cpp_path / "stream"
 
     def _validate_setup(self):
         """セットアップの検証"""
@@ -284,7 +292,13 @@ class StreamingWhisperEngine:
         if self.config.models_path is None:
             self.config.models_path = base_path / "models"
 
-        self._stream_binary = self.config.whisper_cpp_path / "stream"
+        # CMakeビルド後のバイナリパス
+        build_bin = self.config.whisper_cpp_path / "build" / "bin"
+        self._stream_binary = build_bin / "whisper-stream"
+
+        # フォールバック: 古いMakefileビルドのパス
+        if not self._stream_binary.exists():
+            self._stream_binary = self.config.whisper_cpp_path / "stream"
 
     def _get_model_path(self) -> Path:
         """モデルファイルのパスを取得"""
