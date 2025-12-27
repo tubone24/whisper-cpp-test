@@ -124,7 +124,7 @@ class ScreenCaptureKitAudioCapture:
                 try:
                     # CoreMedia からデータを取得
                     import CoreMedia
-                    import ctypes
+
                     block_buffer = CoreMedia.CMSampleBufferGetDataBuffer(sampleBuffer)
                     if block_buffer is None:
                         return
@@ -133,30 +133,24 @@ class ScreenCaptureKitAudioCapture:
                     if data_length == 0:
                         return
 
-                    # CMBlockBufferGetDataPointer: (buffer, offset, lengthAtOffset, totalLength, dataPointer)
-                    # Returns: (status, lengthAtOffset, totalLength, dataPointer)
-                    result = CoreMedia.CMBlockBufferGetDataPointer(
-                        block_buffer, 0, None, None, None
+                    # CMBlockBufferCopyDataBytes を使用してデータをコピー
+                    # PyObjCではポインタの直接アクセスが難しいため、コピー方式を使用
+                    data_bytes = bytearray(data_length)
+                    status = CoreMedia.CMBlockBufferCopyDataBytes(
+                        block_buffer,
+                        0,  # offset
+                        data_length,
+                        data_bytes
                     )
 
-                    # result is tuple: (status, lengthAtOffset, totalLength, dataPointer)
-                    if result is None or len(result) < 4:
+                    if status != 0:
                         return
 
-                    status = result[0]
-                    total_length = result[2] if result[2] else data_length
-                    data_pointer = result[3]
+                    # float32として解釈
+                    audio_data = np.frombuffer(bytes(data_bytes), dtype=np.float32).copy()
 
-                    if status != 0 or data_pointer is None:
-                        return
-
-                    if total_length > 0:
-                        # float32として解釈
-                        buffer = (ctypes.c_char * total_length).from_address(data_pointer)
-                        audio_data = np.frombuffer(bytes(buffer), dtype=np.float32).copy()
-
-                        if len(audio_data) > 0:
-                            self._parent.audio_queue.put(audio_data)
+                    if len(audio_data) > 0:
+                        self._parent.audio_queue.put(audio_data)
 
                 except Exception as e:
                     # エラーは一度だけ表示
