@@ -70,7 +70,18 @@ class ScreenCaptureKitAudioCapture:
 
         import objc
         from Foundation import NSObject, NSRunLoop, NSDate
-        from dispatch import dispatch_queue_create, DISPATCH_QUEUE_SERIAL
+
+        # libdispatchのインポート（オプション）
+        try:
+            from dispatch import dispatch_queue_create, DISPATCH_QUEUE_SERIAL
+            has_dispatch = True
+        except ImportError:
+            has_dispatch = False
+            # dispatch_get_main_queueを使用するフォールバック
+            try:
+                from libdispatch import dispatch_get_main_queue
+            except ImportError:
+                dispatch_get_main_queue = None
 
         parent = self
 
@@ -192,7 +203,12 @@ class ScreenCaptureKitAudioCapture:
             self._output = AudioOutputHandler.alloc().init()
 
             # ディスパッチキューを作成
-            audio_queue = dispatch_queue_create(b"audio_queue", DISPATCH_QUEUE_SERIAL)
+            if has_dispatch:
+                audio_queue = dispatch_queue_create(b"audio_queue", DISPATCH_QUEUE_SERIAL)
+            else:
+                # libdispatchが利用できない場合はNoneを使用
+                # (macOSのデフォルトキューが使われる)
+                audio_queue = None
 
             # 出力を追加
             error_ptr = objc.nil
