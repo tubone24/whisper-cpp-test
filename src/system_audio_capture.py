@@ -113,11 +113,20 @@ class ScreenCaptureKitAudioCapture:
                 if self is None:
                     return None
                 self._parent = parent
+                self._sample_count = 0
+                self._last_log_time = 0
                 return self
 
             def stream_didOutputSampleBuffer_ofType_(self, stream, sampleBuffer, outputType):
                 """音声サンプルを受信 (SCStreamOutput)"""
                 # outputType: 0 = screen, 1 = audio
+                # デバッグ: 最初の数回はタイプを表示
+                if not hasattr(self, '_type_logged'):
+                    self._type_logged = set()
+                if outputType not in self._type_logged and len(self._type_logged) < 3:
+                    print(f"[ScreenCaptureKit] outputType: {outputType} (0=screen, 1=audio)")
+                    self._type_logged.add(outputType)
+
                 if outputType != 1:
                     return
 
@@ -127,6 +136,9 @@ class ScreenCaptureKitAudioCapture:
 
                     block_buffer = CoreMedia.CMSampleBufferGetDataBuffer(sampleBuffer)
                     if block_buffer is None:
+                        if not hasattr(self, '_null_buffer_warned'):
+                            print("[ScreenCaptureKit] Warning: block_buffer is None")
+                            self._null_buffer_warned = True
                         return
 
                     data_length = CoreMedia.CMBlockBufferGetDataLength(block_buffer)
@@ -144,18 +156,31 @@ class ScreenCaptureKitAudioCapture:
                     )
 
                     if status != 0:
+                        if not hasattr(self, '_copy_error_warned'):
+                            print(f"[ScreenCaptureKit] CMBlockBufferCopyDataBytes failed: {status}")
+                            self._copy_error_warned = True
                         return
 
                     # float32として解釈
                     audio_data = np.frombuffer(bytes(data_bytes), dtype=np.float32).copy()
 
                     if len(audio_data) > 0:
+                        self._sample_count += 1
                         self._parent.audio_queue.put(audio_data)
+
+                        # 定期的にデバッグ出力
+                        current_time = time.time()
+                        if current_time - self._last_log_time > 2.0:
+                            rms = np.sqrt(np.mean(audio_data ** 2))
+                            print(f"[ScreenCaptureKit] 受信中: samples={self._sample_count}, len={len(audio_data)}, rms={rms:.6f}")
+                            self._last_log_time = current_time
 
                 except Exception as e:
                     # エラーは一度だけ表示
                     if not hasattr(self, '_error_shown'):
                         print(f"Audio processing error: {e}")
+                        import traceback
+                        traceback.print_exc()
                         self._error_shown = True
 
             def stream_didStopWithError_(self, stream, error):
