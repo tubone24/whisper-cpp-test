@@ -1,0 +1,44 @@
+[project]
+name = "whisper-realtime"
+version = "0.1.0"
+description = "Real-time speech transcription CLI using whisper.cpp"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "sounddevice>=0.4.6",
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "rich>=13.0.0",
+    "click>=8.1.0",
+    "webrtcvad>=2.0.10",
+]
+
+[project.optional-dependencies]
+diarization = [
+    "pyannote-audio>=3.0.0",
+    "torch>=2.0.0",
+]
+# macOS system audio capture using ScreenCaptureKit
+macos = [
+    "pyobjc-framework-ScreenCaptureKit>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-CoreMedia>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-AVFoundation>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-libdispatch>=10.0; sys_platform == 'darwin'",
+]
+
+[project.scripts]
+whisper-realtime = "src.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0.0",
+    "ruff>=0.1.0",
+]
