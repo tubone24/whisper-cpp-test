@@ -265,22 +265,6 @@ After installation:
 3. Check both your speakers and **BlackHole 2ch**
 4. Set this multi-output device as system output in Sound settings
 
-## Display Layout
-
-The CLI provides a stacked display with conversation history and live transcription:
-
-```
-╭──────────── Conversation History ────────────╮
-│ [Speaker 1] Hello, how are you today?        │
-│ [Speaker 2] I'm doing great, thanks!         │
-│ [Speaker 1] That's wonderful to hear.        │
-╰──────────────────────────────────────────────╯
-╭──────────── Live Transcription ──────────────╮
-│ [Speaker 2] Yes, I was thinking about...     │
-│                              Ctrl+C to exit  │
-╰──────────────────────────────────────────────╯
-```
-
 ## Speaker Diarization
 
 When `--speaker` is enabled:
@@ -330,23 +314,6 @@ Re-run model download:
 1. For ScreenCaptureKit: Ensure Screen Recording permission is granted
 2. For BlackHole: Verify multi-output device is set as system output
 3. Make sure audio is actually playing in another app
-
-## Project Structure
-
-```
-whisper-cpp-test/
-├── src/
-│   ├── cli.py                 # CLI entry point
-│   ├── audio_capture.py       # Audio input handling
-│   ├── system_audio_capture.py # ScreenCaptureKit implementation
-│   ├── whisper_engine.py      # Whisper transcription engine
-│   └── diarization.py         # Speaker diarization
-├── whisper.cpp/               # whisper.cpp submodule
-├── models/                    # GGML model files
-├── setup.sh                   # Setup script
-├── pyproject.toml             # Python project config
-└── README.md
-```
 
 ## Dependencies
 
