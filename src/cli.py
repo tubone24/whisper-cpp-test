@@ -8,16 +8,19 @@ import signal
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import click
 import numpy as np
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from rich.layout import Layout
+from rich.style import Style
 
 from .audio_capture import AudioCapture, AudioConfig, AudioSource, VADFilter
 from .diarization import DiarizationManager
@@ -32,16 +35,44 @@ from .whisper_engine import (
 console = Console()
 
 
-class RealtimeDisplay:
-    """リアルタイム表示マネージャー"""
+@dataclass
+class ConversationEntry:
+    """会話エントリー"""
+    speaker: str
+    text: str
+    timestamp: float
 
-    def __init__(self, show_speaker: bool = False):
+
+# 話者ごとの色
+SPEAKER_COLORS = [
+    "cyan",
+    "green",
+    "yellow",
+    "magenta",
+    "blue",
+    "red",
+]
+
+
+class RealtimeDisplay:
+    """リアルタイム表示マネージャー（スタック表示対応）"""
+
+    def __init__(self, show_speaker: bool = False, max_history: int = 50):
         self.show_speaker = show_speaker
-        self.current_text = ""
+        self.max_history = max_history
         self.partial_text = ""
-        self.finalized_lines: list[str] = []
         self.current_speaker = ""
+        self.conversation_history: list[ConversationEntry] = []
+        self._speaker_colors: dict[str, str] = {}
+        self._color_index = 0
         self._lock = threading.Lock()
+
+    def _get_speaker_color(self, speaker: str) -> str:
+        """話者の色を取得（なければ割り当て）"""
+        if speaker not in self._speaker_colors:
+            self._speaker_colors[speaker] = SPEAKER_COLORS[self._color_index % len(SPEAKER_COLORS)]
+            self._color_index += 1
+        return self._speaker_colors[speaker]
 
     def update(self, text: str, is_partial: bool = False, speaker: str = ""):
         """テキストを更新"""
@@ -52,49 +83,91 @@ class RealtimeDisplay:
             if is_partial:
                 self.partial_text = text
             else:
-                if self.partial_text:
-                    # 部分テキストが確定
-                    line = self.partial_text
-                    if self.show_speaker and self.current_speaker:
-                        line = f"[{self.current_speaker}] {line}"
-                    self.finalized_lines.append(line)
-                    self.partial_text = ""
+                # 確定テキストを会話履歴に追加
+                final_text = self.partial_text if self.partial_text else text
+                if final_text:
+                    entry = ConversationEntry(
+                        speaker=self.current_speaker or "話者",
+                        text=final_text,
+                        timestamp=time.time(),
+                    )
+                    self.conversation_history.append(entry)
 
-                if text and text != self.partial_text:
-                    line = text
-                    if self.show_speaker and self.current_speaker:
-                        line = f"[{self.current_speaker}] {line}"
-                    self.finalized_lines.append(line)
+                    # 履歴の上限を超えたら古いものを削除
+                    if len(self.conversation_history) > self.max_history:
+                        self.conversation_history = self.conversation_history[-self.max_history:]
 
-    def render(self) -> Panel:
-        """表示用パネルを生成"""
+                self.partial_text = ""
+
+                # 新しいテキストがあれば追加
+                if text and text != final_text:
+                    entry = ConversationEntry(
+                        speaker=self.current_speaker or "話者",
+                        text=text,
+                        timestamp=time.time(),
+                    )
+                    self.conversation_history.append(entry)
+
+    def _render_history(self) -> Panel:
+        """会話履歴パネルを生成"""
+        content = Text()
+
+        if not self.conversation_history:
+            content.append("(会話履歴なし)", style="dim")
+        else:
+            # 最新の会話を表示
+            display_entries = self.conversation_history[-30:]  # 最新30件
+
+            for entry in display_entries:
+                if self.show_speaker:
+                    color = self._get_speaker_color(entry.speaker)
+                    content.append(f"[{entry.speaker}] ", style=f"bold {color}")
+                content.append(f"{entry.text}\n")
+
+        return Panel(
+            content,
+            title="[bold blue]会話履歴[/bold blue]",
+            border_style="blue",
+            padding=(0, 1),
+        )
+
+    def _render_live(self) -> Panel:
+        """リアルタイム文字起こしパネルを生成"""
+        content = Text()
+
+        if self.partial_text:
+            if self.show_speaker and self.current_speaker:
+                color = self._get_speaker_color(self.current_speaker)
+                content.append(f"[{self.current_speaker}] ", style=f"bold {color}")
+            content.append(self.partial_text, style="italic")
+        else:
+            content.append("🎤 音声を待機中...", style="dim")
+
+        return Panel(
+            content,
+            title="[bold green]リアルタイム[/bold green]",
+            subtitle="[dim]Ctrl+C で終了[/dim]",
+            border_style="green",
+            padding=(0, 1),
+        )
+
+    def render(self) -> Group:
+        """表示用コンテンツを生成（履歴 + リアルタイム）"""
         with self._lock:
-            # 確定テキスト
-            content = Text()
-            for line in self.finalized_lines[-20:]:  # 最新20行
-                content.append(line + "\n")
-
-            # 部分テキスト（イタリック表示）
-            if self.partial_text:
-                partial = self.partial_text
-                if self.show_speaker and self.current_speaker:
-                    partial = f"[{self.current_speaker}] {partial}"
-                content.append(partial, style="italic dim")
-
-            if not content.plain:
-                content.append("(音声を待機中...)", style="dim")
-
-            return Panel(
-                content,
-                title="[bold green]リアルタイム文字起こし[/bold green]",
-                subtitle="[dim]Ctrl+C で終了[/dim]",
-                border_style="green",
+            return Group(
+                self._render_history(),
+                self._render_live(),
             )
 
     def get_full_text(self) -> str:
         """全テキストを取得"""
         with self._lock:
-            lines = self.finalized_lines.copy()
+            lines = []
+            for entry in self.conversation_history:
+                if self.show_speaker:
+                    lines.append(f"[{entry.speaker}] {entry.text}")
+                else:
+                    lines.append(entry.text)
             if self.partial_text:
                 lines.append(self.partial_text)
             return "\n".join(lines)
