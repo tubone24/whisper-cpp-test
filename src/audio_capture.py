@@ -48,6 +48,8 @@ class AudioCapture:
         self.is_running = False
         self._stream: Optional[sd.InputStream] = None
         self._system_stream: Optional[sd.InputStream] = None
+        self._sck_capture = None  # ScreenCaptureKit capture
+        self._use_sck = False
         self._lock = threading.Lock()
 
     @staticmethod
@@ -109,15 +111,35 @@ class AudioCapture:
                 self._stream.start()
 
             elif self.source == AudioSource.SYSTEM:
-                # システム音声はBlackHoleなどの仮想デバイスが必要
+                # システム音声キャプチャ
+                # 1. まずBlackHoleなどの仮想デバイスを探す
                 device = self.system_device_id or self.find_blackhole_device()
-                if device is None:
-                    raise RuntimeError(
-                        "システム音声キャプチャにはBlackHoleが必要です。\n"
-                        "インストール: brew install blackhole-2ch"
-                    )
-                self._stream = self._create_stream(device)
-                self._stream.start()
+                if device is not None:
+                    self._stream = self._create_stream(device)
+                    self._stream.start()
+                else:
+                    # 2. ScreenCaptureKitを試す (macOS 13+)
+                    try:
+                        from .system_audio_capture import get_system_audio_capture, is_screencapturekit_available
+                        if is_screencapturekit_available():
+                            self._sck_capture = get_system_audio_capture(
+                                sample_rate=self.config.sample_rate,
+                                chunk_duration=self.config.chunk_duration,
+                                prefer_screencapturekit=True,
+                            )
+                            self._sck_capture.start()
+                            # キューを共有
+                            self._use_sck = True
+                        else:
+                            raise RuntimeError("ScreenCaptureKit not available")
+                    except Exception as e:
+                        raise RuntimeError(
+                            f"システム音声キャプチャに失敗しました。\n"
+                            f"以下のいずれかを試してください:\n"
+                            f"  1. BlackHoleをインストール: brew install blackhole-2ch\n"
+                            f"  2. macOS 13+でScreenCaptureKitを使用: uv pip install 'whisper-realtime[macos]'\n"
+                            f"エラー: {e}"
+                        )
 
             elif self.source == AudioSource.BOTH:
                 # マイクとシステム音声の両方
@@ -146,10 +168,19 @@ class AudioCapture:
                 self._system_stream.close()
                 self._system_stream = None
 
+            if self._sck_capture:
+                self._sck_capture.stop()
+                self._sck_capture = None
+                self._use_sck = False
+
             self.is_running = False
 
     def get_audio(self, timeout: float = 1.0) -> Optional[np.ndarray]:
         """音声データを取得"""
+        # ScreenCaptureKitを使用している場合
+        if self._use_sck and self._sck_capture:
+            return self._sck_capture.get_audio(timeout=timeout)
+
         try:
             return self.audio_queue.get(timeout=timeout)
         except queue.Empty:
@@ -185,16 +216,22 @@ class VADFilter:
             frame_duration_ms: フレーム長 (10, 20, 30)
             aggressiveness: 検出の積極性 (0-3, 高いほど厳格)
         """
+        self.sample_rate = sample_rate
+        self.frame_duration_ms = frame_duration_ms
+        self.frame_size = int(sample_rate * frame_duration_ms / 1000)
+        self.enabled = False
+        self.vad = None
+
         try:
             import webrtcvad
             self.vad = webrtcvad.Vad(aggressiveness)
-            self.sample_rate = sample_rate
-            self.frame_duration_ms = frame_duration_ms
-            self.frame_size = int(sample_rate * frame_duration_ms / 1000)
             self.enabled = True
         except ImportError:
-            print("Warning: webrtcvad not installed. VAD disabled.")
-            self.enabled = False
+            # webrtcvadはオプション - Apple Siliconでのビルドが難しい場合がある
+            pass
+        except Exception as e:
+            # webrtcvadのロードエラー
+            pass
 
     def is_speech(self, audio: np.ndarray) -> bool:
         """音声データに発話が含まれているかチェック"""

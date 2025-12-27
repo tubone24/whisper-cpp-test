@@ -18,6 +18,13 @@ diarization = [
     "pyannote-audio>=3.0.0",
     "torch>=2.0.0",
 ]
+# macOSでScreenCaptureKitを使用したシステム音声キャプチャ
+macos = [
+    "pyobjc-framework-ScreenCaptureKit>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-CoreMedia>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-AVFoundation>=10.0; sys_platform == 'darwin'",
+]
 
 [project.scripts]
 whisper-realtime = "src.cli:main"

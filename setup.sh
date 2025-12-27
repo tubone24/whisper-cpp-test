@@ -27,15 +27,27 @@ setup_whisper_cpp() {
 
     echo "whisper.cpp をビルド中 (Apple Silicon 最適化)..."
 
+    # SDL2が必要（streamコマンド用）
+    if ! brew list sdl2 &>/dev/null; then
+        echo "SDL2をインストール中..."
+        brew install sdl2
+    fi
+
     # ビルドディレクトリをクリーン
     rm -rf build 2>/dev/null || true
 
-    # CMakeでビルド（Apple Silicon + Core ML最適化）
+    # CMakeでビルド（Apple Silicon + Core ML最適化 + SDL2 + examples）
     cmake -B build \
         -DWHISPER_COREML=1 \
+        -DWHISPER_SDL2=ON \
+        -DWHISPER_BUILD_EXAMPLES=ON \
         -DCMAKE_BUILD_TYPE=Release
 
     cmake --build build -j$(sysctl -n hw.ncpu) --config Release
+
+    echo ""
+    echo "ビルドされたバイナリ:"
+    ls -la build/bin/ 2>/dev/null || echo "  (binディレクトリなし)"
 
     echo "whisper.cpp のビルド完了!"
 }
@@ -102,14 +114,20 @@ show_audio_setup_info() {
     echo "  → 追加設定不要。そのまま使用できます。"
     echo ""
     echo "■ システム音声キャプチャ (macOS):"
-    echo "  BlackHole (仮想オーディオデバイス) のインストールが必要です:"
     echo ""
-    echo "  brew install blackhole-2ch"
+    echo "  【方法1】ScreenCaptureKit (macOS 13+ 推奨)"
+    echo "    追加パッケージをインストール:"
+    echo "    uv pip install 'whisper-realtime[macos]'"
     echo ""
-    echo "  インストール後、Audio MIDI設定で「複数出力装置」を作成し、"
-    echo "  スピーカーとBlackHoleを両方追加してください。"
+    echo "    ※ 初回実行時に画面録画の権限許可が必要です"
     echo ""
-    echo "  詳細: https://github.com/ExistentialAudio/BlackHole"
+    echo "  【方法2】BlackHole (仮想オーディオデバイス)"
+    echo "    brew install blackhole-2ch"
+    echo ""
+    echo "    インストール後、Audio MIDI設定で「複数出力装置」を作成し、"
+    echo "    スピーカーとBlackHoleを両方追加してください。"
+    echo ""
+    echo "    詳細: https://github.com/ExistentialAudio/BlackHole"
     echo ""
 }
 
