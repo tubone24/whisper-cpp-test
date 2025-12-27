@@ -180,7 +180,10 @@ class ScreenCaptureKitAudioCapture:
                     shareable_content[0] = content
                 content_ready.set()
 
-            SCShareableContent.getShareableContentWithCompletionHandler_(content_handler)
+            # excludingDesktopWindows: NO, onScreenWindowsOnly: YES
+            SCShareableContent.getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler_(
+                False, True, content_handler
+            )
 
             # 権限確認のため待機
             if not content_ready.wait(timeout=10.0):
@@ -205,49 +208,75 @@ class ScreenCaptureKitAudioCapture:
                 raise RuntimeError("ディスプレイが見つかりません")
 
             display = displays[0]
+            print(f"[ScreenCaptureKit] ディスプレイ検出: {display.displayID()}")
 
             # ストリーム設定
             config = SCStreamConfiguration.alloc().init()
-            config.setWidth_(1)  # 最小サイズ（音声のみ）
-            config.setHeight_(1)
+
+            # 最小のビデオ設定（音声のみキャプチャしたいが、ビデオも必要）
+            config.setWidth_(2)
+            config.setHeight_(2)
+            config.setShowsCursor_(False)
+
+            # 音声設定
             config.setCapturesAudio_(True)
-            config.setExcludesCurrentProcessAudio_(True)  # 自分自身の音声は除外
+            config.setExcludesCurrentProcessAudio_(True)
             config.setSampleRate_(float(self.sample_rate))
             config.setChannelCount_(1)
 
-            # フィルター（全画面、ウィンドウ除外なし）
+            # フィルター（デスクトップ全体をキャプチャ）
             content_filter = SCContentFilter.alloc().initWithDisplay_excludingWindows_(
                 display, []
             )
 
+            if content_filter is None:
+                raise RuntimeError("コンテンツフィルターの作成に失敗しました")
+
             # StreamHandlerを作成（強参照を維持）
             self._stream_output = StreamHandler.alloc().init()
+            if self._stream_output is None:
+                raise RuntimeError("StreamHandlerの作成に失敗しました")
 
-            # ストリームを作成（delegateとしてもStreamHandlerを使用）
+            # ストリームを作成
             self._stream = SCStream.alloc().initWithFilter_configuration_delegate_(
                 content_filter, config, self._stream_output
             )
 
-            # 音声出力を追加
-            error_ptr = objc.nil
+            if self._stream is None:
+                raise RuntimeError(
+                    "SCStreamの作成に失敗しました。\n"
+                    "画面収録の権限を確認してください: システム設定 > プライバシー > 画面収録"
+                )
+
+            print("[ScreenCaptureKit] ストリーム作成完了")
 
             # ディスパッチキューを作成
+            dispatch_queue = None
             try:
-                from libdispatch import dispatch_queue_create, DISPATCH_QUEUE_SERIAL
-                audio_queue = dispatch_queue_create(b"audio_capture_queue", DISPATCH_QUEUE_SERIAL)
+                from dispatch import dispatch_queue_create, DISPATCH_QUEUE_SERIAL
+                dispatch_queue = dispatch_queue_create(b"audio_capture_queue", DISPATCH_QUEUE_SERIAL)
             except ImportError:
-                # libdispatchが利用できない場合はNone
-                audio_queue = None
+                try:
+                    from libdispatch import dispatch_queue_create, DISPATCH_QUEUE_SERIAL
+                    dispatch_queue = dispatch_queue_create(b"audio_capture_queue", DISPATCH_QUEUE_SERIAL)
+                except ImportError:
+                    # ディスパッチキューなしで続行（メインスレッドで処理）
+                    print("[ScreenCaptureKit] 警告: libdispatchが利用できません")
+                    pass
 
-            success = self._stream.addStreamOutput_type_sampleHandlerQueue_error_(
+            # 音声出力を追加
+            success, error = self._stream.addStreamOutput_type_sampleHandlerQueue_error_(
                 self._stream_output,
                 1,  # SCStreamOutputTypeAudio
-                audio_queue,
-                error_ptr
+                dispatch_queue,
+                None
             )
 
             if not success:
-                raise RuntimeError("音声出力の追加に失敗しました")
+                error_msg = str(error) if error else "不明なエラー"
+                raise RuntimeError(f"音声出力の追加に失敗しました: {error_msg}")
+
+            print("[ScreenCaptureKit] 音声出力追加完了")
 
             # キャプチャ開始
             start_ready = threading.Event()
