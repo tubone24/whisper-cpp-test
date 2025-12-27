@@ -193,14 +193,30 @@ def list_audio_devices():
 
     console.print(table)
 
+    # システム音声キャプチャのステータス
+    console.print("\n[bold]システム音声キャプチャ:[/bold]")
+
+    # ScreenCaptureKit確認
+    try:
+        from .system_audio_capture import is_screencapturekit_available, get_screencapturekit_error
+        if is_screencapturekit_available():
+            console.print("  [green]✓ ScreenCaptureKit[/green] - BlackHole不要でシステム音声をキャプチャ可能")
+        else:
+            error = get_screencapturekit_error() or "不明なエラー"
+            console.print(f"  [yellow]○ ScreenCaptureKit[/yellow] - 利用不可: {error}")
+    except ImportError:
+        console.print("  [dim]○ ScreenCaptureKit[/dim] - モジュール未インストール")
+
     # BlackHole検出
     blackhole_id = AudioCapture.find_blackhole_device()
     if blackhole_id is not None:
-        console.print(f"\n[green]BlackHole検出: ID {blackhole_id}[/green]")
-        console.print("システム音声キャプチャが利用可能です")
+        console.print(f"  [green]✓ BlackHole[/green] - デバイスID: {blackhole_id}")
     else:
-        console.print("\n[yellow]BlackHoleが見つかりません[/yellow]")
-        console.print("システム音声をキャプチャするには: brew install blackhole-2ch")
+        console.print("  [dim]○ BlackHole[/dim] - 未インストール")
+
+    console.print("\n[dim]ScreenCaptureKitを有効にするには:[/dim]")
+    console.print("  uv pip install 'whisper-realtime[macos]'")
+    console.print("  システム設定 > プライバシー > 画面収録 で許可")
 
 
 def list_models(models_path: Path):

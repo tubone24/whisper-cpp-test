@@ -4,6 +4,7 @@
 """
 
 import queue
+import sys
 import threading
 from dataclasses import dataclass
 from enum import Enum
@@ -27,6 +28,7 @@ class AudioConfig:
     channels: int = 1
     chunk_duration: float = 0.5  # チャンクの長さ（秒）
     dtype: str = "float32"
+    use_screencapturekit: bool = True  # ScreenCaptureKitを優先使用
 
 
 class AudioCapture:
@@ -49,6 +51,7 @@ class AudioCapture:
         self._stream: Optional[sd.InputStream] = None
         self._system_stream: Optional[sd.InputStream] = None
         self._sck_capture = None  # ScreenCaptureKit capture
+        self._sck_thread = None  # ScreenCaptureKit audio forwarding thread
         self._use_sck = False
         self._lock = threading.Lock()
 
@@ -100,6 +103,45 @@ class AudioCapture:
             callback=self._audio_callback,
         )
 
+    def _try_screencapturekit(self) -> bool:
+        """ScreenCaptureKitでのシステム音声キャプチャを試みる"""
+        if sys.platform != "darwin" or not self.config.use_screencapturekit:
+            return False
+
+        try:
+            from .system_audio_capture import (
+                ScreenCaptureKitAudioCapture,
+                is_screencapturekit_available,
+            )
+
+            if not is_screencapturekit_available():
+                return False
+
+            self._sck_capture = ScreenCaptureKitAudioCapture(
+                sample_rate=self.config.sample_rate,
+                chunk_duration=self.config.chunk_duration,
+            )
+            self._sck_capture.start()
+            self._use_sck = True
+
+            # ScreenCaptureKitからの音声をメインキューに転送するスレッド
+            def forward_audio():
+                while self._use_sck and self._sck_capture and self._sck_capture.is_running:
+                    audio = self._sck_capture.get_audio(timeout=0.5)
+                    if audio is not None and len(audio) > 0:
+                        self.audio_queue.put(audio)
+
+            self._sck_thread = threading.Thread(target=forward_audio, daemon=True)
+            self._sck_thread.start()
+
+            return True
+
+        except Exception as e:
+            print(f"[ScreenCaptureKit] 初期化エラー: {e}")
+            self._sck_capture = None
+            self._use_sck = False
+            return False
+
     def start(self):
         """音声キャプチャを開始"""
         with self._lock:
@@ -111,41 +153,50 @@ class AudioCapture:
                 self._stream.start()
 
             elif self.source == AudioSource.SYSTEM:
-                # システム音声キャプチャ（BlackHole必須）
-                device = self.system_device_id or self.find_blackhole_device()
-                if device is not None:
-                    self._stream = self._create_stream(device)
-                    self._stream.start()
+                # まずScreenCaptureKitを試みる（macOS 13.0+、BlackHole不要）
+                if self._try_screencapturekit():
+                    print("[ScreenCaptureKit] BlackHoleなしでシステム音声をキャプチャ中")
                 else:
-                    raise RuntimeError(
-                        "システム音声キャプチャには BlackHole が必要です。\n\n"
-                        "インストール手順:\n"
-                        "  1. brew install blackhole-2ch\n"
-                        "  2. Audio MIDI設定.app を開く\n"
-                        "  3. 左下の「+」→「複数出力装置を作成」\n"
-                        "  4. 「BlackHole 2ch」と使用するスピーカーをチェック\n"
-                        "  5. システム設定 > サウンド > 出力 で「複数出力装置」を選択\n\n"
-                        "または、マイクのみで使用:\n"
-                        "  uv run whisper-realtime start  (システム音声なし)"
-                    )
+                    # フォールバック: BlackHoleなどの仮想デバイス
+                    device = self.system_device_id or self.find_blackhole_device()
+                    if device is not None:
+                        self._stream = self._create_stream(device)
+                        self._stream.start()
+                    else:
+                        raise RuntimeError(
+                            "システム音声キャプチャを開始できません。\n\n"
+                            "macOS 13.0以上の場合:\n"
+                            "  1. uv pip install 'whisper-realtime[macos]'\n"
+                            "  2. システム設定 > プライバシー > 画面収録 で許可\n\n"
+                            "または BlackHole をインストール:\n"
+                            "  1. brew install blackhole-2ch\n"
+                            "  2. Audio MIDI設定.app を開く\n"
+                            "  3. 左下の「+」→「複数出力装置を作成」\n"
+                            "  4. 「BlackHole 2ch」と使用するスピーカーをチェック\n"
+                            "  5. システム設定 > サウンド > 出力 で「複数出力装置」を選択"
+                        )
 
             elif self.source == AudioSource.BOTH:
-                # マイクとシステム音声の両方
+                # マイクストリームを開始
                 self._stream = self._create_stream(self.device_id)
                 self._stream.start()
 
-                # システム音声キャプチャ
-                system_device = self.system_device_id or self.find_blackhole_device()
-                if system_device is not None:
-                    # BlackHoleなどの仮想デバイスがある場合
-                    self._system_stream = self._create_stream(system_device)
-                    self._system_stream.start()
+                # システム音声: ScreenCaptureKitを優先
+                if self._try_screencapturekit():
+                    print("[ScreenCaptureKit] マイク + システム音声をキャプチャ中")
                 else:
-                    # BlackHoleがない場合は警告のみ表示（マイクのみで続行）
-                    print("[警告] BlackHoleが見つかりません。マイクのみで録音を続行します。")
-                    print("システム音声もキャプチャするには BlackHole をインストール:")
-                    print("  brew install blackhole-2ch")
-                    print("  その後、Audio MIDI設定で「複数出力装置」を作成してください。")
+                    # フォールバック: BlackHoleなどの仮想デバイス
+                    system_device = self.system_device_id or self.find_blackhole_device()
+                    if system_device is not None:
+                        self._system_stream = self._create_stream(system_device)
+                        self._system_stream.start()
+                        print("[BlackHole] マイク + システム音声をキャプチャ中")
+                    else:
+                        # システム音声なしで続行
+                        print("[警告] システム音声キャプチャが利用できません。マイクのみで続行します。")
+                        print("ScreenCaptureKit を使用するには:")
+                        print("  uv pip install 'whisper-realtime[macos]'")
+                        print("  システム設定 > プライバシー > 画面収録 で許可")
 
             self.is_running = True
 
@@ -165,10 +216,16 @@ class AudioCapture:
                 self._system_stream.close()
                 self._system_stream = None
 
+            # ScreenCaptureKitの停止
+            self._use_sck = False  # スレッドに停止を通知
             if self._sck_capture:
                 self._sck_capture.stop()
                 self._sck_capture = None
-                self._use_sck = False
+
+            # 転送スレッドの終了を待機
+            if self._sck_thread:
+                self._sck_thread.join(timeout=2.0)
+                self._sck_thread = None
 
             self.is_running = False
 

@@ -3,36 +3,49 @@
 ScreenCaptureKit を使用してBlackHoleなしでシステム音声をキャプチャ
 
 macOS 13.0+ が必要
+
+Note: macOS Sonoma/Sequoia では SCStreamOutput への弱参照問題があるため、
+SCStreamOutput と SCStreamDelegate を同一クラスで実装する必要がある。
+参考: https://github.com/ronaldoussoren/pyobjc/issues/647
 """
 
 import queue
+import sys
 import threading
 import time
-from typing import Callable, Optional
+from typing import Optional
 
 import numpy as np
 
 # ScreenCaptureKit用のフラグ
 SCREENCAPTUREKIT_AVAILABLE = False
-SCK_CLASSES = {}
+SCK_ERROR_MESSAGE = None
 
-try:
-    import objc
-    from Foundation import NSObject, NSRunLoop, NSDate
-    from AppKit import NSApplication
-
-    # ScreenCaptureKitのロード
+# macOS以外では無効
+if sys.platform != "darwin":
+    SCK_ERROR_MESSAGE = "ScreenCaptureKit is only available on macOS"
+else:
     try:
-        SCK_BUNDLE = objc.loadBundle(
-            'ScreenCaptureKit',
-            bundle_path='/System/Library/Frameworks/ScreenCaptureKit.framework',
-            module_globals=SCK_CLASSES
-        )
-        SCREENCAPTUREKIT_AVAILABLE = True
-    except Exception as e:
-        print(f"ScreenCaptureKit load error: {e}")
-except ImportError as e:
-    print(f"PyObjC import error: {e}")
+        import objc
+        from Foundation import NSObject
+
+        # pyobjc-framework-ScreenCaptureKit から直接インポート
+        try:
+            import ScreenCaptureKit
+            from ScreenCaptureKit import (
+                SCContentFilter,
+                SCShareableContent,
+                SCStream,
+                SCStreamConfiguration,
+            )
+            SCREENCAPTUREKIT_AVAILABLE = True
+        except ImportError as e:
+            SCK_ERROR_MESSAGE = (
+                f"pyobjc-framework-ScreenCaptureKit が必要です: {e}\n"
+                "インストール: uv pip install 'whisper-realtime[macos]'"
+            )
+    except ImportError as e:
+        SCK_ERROR_MESSAGE = f"PyObjC import error: {e}"
 
 
 class ScreenCaptureKitAudioCapture:
@@ -49,10 +62,10 @@ class ScreenCaptureKitAudioCapture:
     def __init__(self, sample_rate: int = 16000, chunk_duration: float = 0.5):
         if not SCREENCAPTUREKIT_AVAILABLE:
             raise RuntimeError(
-                "ScreenCaptureKit が利用できません。\n"
+                f"ScreenCaptureKit が利用できません。\n{SCK_ERROR_MESSAGE}\n\n"
                 "必要条件:\n"
                 "  - macOS 13.0 (Ventura) 以降\n"
-                "  - pip install pyobjc-framework-ScreenCaptureKit pyobjc-framework-Cocoa"
+                "  - uv pip install 'whisper-realtime[macos]'"
             )
 
         self.sample_rate = sample_rate
@@ -60,8 +73,9 @@ class ScreenCaptureKitAudioCapture:
         self.audio_queue: queue.Queue = queue.Queue()
         self.is_running = False
         self._stream = None
-        self._output = None
+        self._stream_output = None  # Strong reference to prevent GC
         self._error_message = None
+        self._lock = threading.Lock()
 
     def start(self):
         """キャプチャを開始"""
@@ -69,81 +83,91 @@ class ScreenCaptureKitAudioCapture:
             return
 
         import objc
-        from Foundation import NSObject, NSRunLoop, NSDate
-
-        # libdispatchのインポート（オプション）
-        try:
-            from dispatch import dispatch_queue_create, DISPATCH_QUEUE_SERIAL
-            has_dispatch = True
-        except ImportError:
-            has_dispatch = False
-            # dispatch_get_main_queueを使用するフォールバック
-            try:
-                from libdispatch import dispatch_get_main_queue
-            except ImportError:
-                dispatch_get_main_queue = None
+        from Foundation import NSObject
 
         parent = self
 
-        # SCStreamOutputプロトコルを実装したクラス
+        # SCStreamOutput と SCStreamDelegate を同一クラスで実装
+        # macOS Sonoma/Sequoia の弱参照問題を回避するため
         SCStreamOutput = objc.protocolNamed('SCStreamOutput')
+        SCStreamDelegate = objc.protocolNamed('SCStreamDelegate')
 
-        class AudioOutputHandler(NSObject, protocols=[SCStreamOutput]):
-            """音声出力ハンドラー"""
+        if SCStreamOutput is None:
+            raise RuntimeError(
+                "SCStreamOutput protocol not found. "
+                "Ensure pyobjc-framework-ScreenCaptureKit is properly installed."
+            )
+
+        protocols = [SCStreamOutput]
+        if SCStreamDelegate is not None:
+            protocols.append(SCStreamDelegate)
+
+        class StreamHandler(NSObject, protocols=protocols):
+            """
+            音声出力ハンドラーとデリゲートを統合
+            弱参照問題を回避するため、両方のプロトコルを実装
+            """
+
+            def init(self):
+                self = objc.super(StreamHandler, self).init()
+                if self is None:
+                    return None
+                self._parent = parent
+                return self
 
             def stream_didOutputSampleBuffer_ofType_(self, stream, sampleBuffer, outputType):
-                """音声サンプルを受信"""
+                """音声サンプルを受信 (SCStreamOutput)"""
                 # outputType: 0 = screen, 1 = audio
                 if outputType != 1:
                     return
 
                 try:
+                    # CoreMedia からデータを取得
                     import CoreMedia
 
-                    # CMSampleBufferからデータを取得
                     block_buffer = CoreMedia.CMSampleBufferGetDataBuffer(sampleBuffer)
                     if block_buffer is None:
                         return
 
-                    # データ長を取得
                     data_length = CoreMedia.CMBlockBufferGetDataLength(block_buffer)
                     if data_length == 0:
                         return
 
                     # データをコピー
-                    data = CoreMedia.CMBlockBufferCopyDataBytes(
-                        block_buffer, 0, data_length, None
+                    data_pointer, length_out = CoreMedia.CMBlockBufferGetDataPointer(
+                        block_buffer, 0, None, None
                     )
 
-                    if data and len(data) > 0:
-                        # float32として解釈 (ScreenCaptureKitはFloat32を出力)
-                        audio_data = np.frombuffer(data, dtype=np.float32).copy()
+                    if data_pointer is not None and length_out > 0:
+                        # float32として解釈
+                        import ctypes
+                        buffer = (ctypes.c_char * length_out).from_address(data_pointer)
+                        audio_data = np.frombuffer(bytes(buffer), dtype=np.float32).copy()
+
                         if len(audio_data) > 0:
-                            parent.audio_queue.put(audio_data)
+                            self._parent.audio_queue.put(audio_data)
 
                 except Exception as e:
+                    # CoreMedia関連のエラーは一度だけ表示
                     if "CoreMedia" not in str(e):
                         print(f"Audio processing error: {e}")
 
-        class StreamDelegate(NSObject):
-            """SCStreamデリゲート"""
-
             def stream_didStopWithError_(self, stream, error):
+                """ストリームが停止 (SCStreamDelegate)"""
                 if error:
-                    parent._error_message = str(error)
+                    self._parent._error_message = str(error)
                     print(f"Stream stopped with error: {error}")
-                parent.is_running = False
+                self._parent.is_running = False
+
+            def outputVideoEffectDidStartForStream_(self, stream):
+                """ビデオエフェクト開始 (無視)"""
+                pass
+
+            def outputVideoEffectDidStopForStream_(self, stream):
+                """ビデオエフェクト停止 (無視)"""
+                pass
 
         try:
-            # クラスを取得
-            SCShareableContent = SCK_CLASSES.get('SCShareableContent')
-            SCStreamConfiguration = SCK_CLASSES.get('SCStreamConfiguration')
-            SCContentFilter = SCK_CLASSES.get('SCContentFilter')
-            SCStream = SCK_CLASSES.get('SCStream')
-
-            if not all([SCShareableContent, SCStreamConfiguration, SCContentFilter, SCStream]):
-                raise RuntimeError("ScreenCaptureKit classes not found")
-
             # 共有可能なコンテンツを取得
             content_ready = threading.Event()
             shareable_content = [None]
@@ -151,7 +175,7 @@ class ScreenCaptureKitAudioCapture:
 
             def content_handler(content, error):
                 if error:
-                    content_error[0] = error
+                    content_error[0] = str(error)
                 else:
                     shareable_content[0] = content
                 content_ready.set()
@@ -159,9 +183,9 @@ class ScreenCaptureKitAudioCapture:
             SCShareableContent.getShareableContentWithCompletionHandler_(content_handler)
 
             # 権限確認のため待機
-            if not content_ready.wait(timeout=5.0):
+            if not content_ready.wait(timeout=10.0):
                 raise RuntimeError(
-                    "画面収録の権限がありません。\n"
+                    "画面収録の権限確認がタイムアウトしました。\n"
                     "システム環境設定 > プライバシーとセキュリティ > 画面収録 で許可してください。"
                 )
 
@@ -170,7 +194,10 @@ class ScreenCaptureKitAudioCapture:
 
             content = shareable_content[0]
             if content is None:
-                raise RuntimeError("画面収録の権限がありません")
+                raise RuntimeError(
+                    "画面収録の権限がありません。\n"
+                    "システム環境設定 > プライバシーとセキュリティ > 画面収録 で許可してください。"
+                )
 
             # ディスプレイを取得
             displays = content.displays()
@@ -184,36 +211,36 @@ class ScreenCaptureKitAudioCapture:
             config.setWidth_(1)  # 最小サイズ（音声のみ）
             config.setHeight_(1)
             config.setCapturesAudio_(True)
-            config.setExcludesCurrentProcessAudio_(True)
+            config.setExcludesCurrentProcessAudio_(True)  # 自分自身の音声は除外
             config.setSampleRate_(float(self.sample_rate))
             config.setChannelCount_(1)
 
-            # フィルター
-            filter = SCContentFilter.alloc().initWithDisplay_excludingWindows_(display, [])
-
-            # デリゲートを先に作成
-            delegate = StreamDelegate.alloc().init()
-
-            # ストリームを作成
-            self._stream = SCStream.alloc().initWithFilter_configuration_delegate_(
-                filter, config, delegate
+            # フィルター（全画面、ウィンドウ除外なし）
+            content_filter = SCContentFilter.alloc().initWithDisplay_excludingWindows_(
+                display, []
             )
 
-            # 音声出力ハンドラーを追加
-            self._output = AudioOutputHandler.alloc().init()
+            # StreamHandlerを作成（強参照を維持）
+            self._stream_output = StreamHandler.alloc().init()
+
+            # ストリームを作成（delegateとしてもStreamHandlerを使用）
+            self._stream = SCStream.alloc().initWithFilter_configuration_delegate_(
+                content_filter, config, self._stream_output
+            )
+
+            # 音声出力を追加
+            error_ptr = objc.nil
 
             # ディスパッチキューを作成
-            if has_dispatch:
-                audio_queue = dispatch_queue_create(b"audio_queue", DISPATCH_QUEUE_SERIAL)
-            else:
-                # libdispatchが利用できない場合はNoneを使用
-                # (macOSのデフォルトキューが使われる)
+            try:
+                from libdispatch import dispatch_queue_create, DISPATCH_QUEUE_SERIAL
+                audio_queue = dispatch_queue_create(b"audio_capture_queue", DISPATCH_QUEUE_SERIAL)
+            except ImportError:
+                # libdispatchが利用できない場合はNone
                 audio_queue = None
 
-            # 出力を追加
-            error_ptr = objc.nil
             success = self._stream.addStreamOutput_type_sampleHandlerQueue_error_(
-                self._output,
+                self._stream_output,
                 1,  # SCStreamOutputTypeAudio
                 audio_queue,
                 error_ptr
@@ -228,14 +255,14 @@ class ScreenCaptureKitAudioCapture:
 
             def start_handler(error):
                 if error:
-                    start_error[0] = error
+                    start_error[0] = str(error)
                 else:
                     parent.is_running = True
                 start_ready.set()
 
             self._stream.startCaptureWithCompletionHandler_(start_handler)
 
-            if not start_ready.wait(timeout=5.0):
+            if not start_ready.wait(timeout=10.0):
                 raise RuntimeError("キャプチャ開始がタイムアウトしました")
 
             if start_error[0]:
@@ -245,14 +272,27 @@ class ScreenCaptureKitAudioCapture:
 
         except Exception as e:
             self.is_running = False
+            self._stream = None
+            self._stream_output = None
             raise RuntimeError(f"ScreenCaptureKit の開始に失敗: {e}")
 
     def stop(self):
         """キャプチャを停止"""
-        if self._stream:
-            self._stream.stopCaptureWithCompletionHandler_(lambda error: None)
-            self._stream = None
-        self.is_running = False
+        with self._lock:
+            if self._stream:
+                stop_ready = threading.Event()
+
+                def stop_handler(error):
+                    if error:
+                        print(f"Stop error: {error}")
+                    stop_ready.set()
+
+                self._stream.stopCaptureWithCompletionHandler_(stop_handler)
+                stop_ready.wait(timeout=5.0)
+                self._stream = None
+
+            self._stream_output = None
+            self.is_running = False
 
     def get_audio(self, timeout: float = 1.0) -> Optional[np.ndarray]:
         """音声データを取得"""
@@ -260,6 +300,18 @@ class ScreenCaptureKitAudioCapture:
             return self.audio_queue.get(timeout=timeout)
         except queue.Empty:
             return None
+
+    def get_all_audio(self) -> np.ndarray:
+        """キューにある全ての音声データを取得"""
+        chunks = []
+        while not self.audio_queue.empty():
+            try:
+                chunks.append(self.audio_queue.get_nowait())
+            except queue.Empty:
+                break
+        if chunks:
+            return np.concatenate(chunks)
+        return np.array([], dtype=np.float32)
 
     def __enter__(self):
         self.start()
@@ -383,6 +435,7 @@ def get_system_audio_capture(
             return ScreenCaptureKitAudioCapture(sample_rate, chunk_duration)
         except Exception as e:
             print(f"ScreenCaptureKit unavailable: {e}")
+            print("Falling back to virtual audio device...")
 
     return SimpleSystemAudioCapture(sample_rate, chunk_duration, device_id)
 
@@ -390,3 +443,8 @@ def get_system_audio_capture(
 def is_screencapturekit_available() -> bool:
     """ScreenCaptureKitが利用可能か確認"""
     return SCREENCAPTUREKIT_AVAILABLE
+
+
+def get_screencapturekit_error() -> Optional[str]:
+    """ScreenCaptureKitのエラーメッセージを取得"""
+    return SCK_ERROR_MESSAGE
