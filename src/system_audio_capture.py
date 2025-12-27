@@ -124,7 +124,9 @@ class ScreenCaptureKitAudioCapture:
                 try:
                     # CoreMedia からデータを取得
                     import CoreMedia
+                    import AudioToolbox
 
+                    # AudioBufferListを使用してデータを取得
                     block_buffer = CoreMedia.CMSampleBufferGetDataBuffer(sampleBuffer)
                     if block_buffer is None:
                         return
@@ -133,24 +135,37 @@ class ScreenCaptureKitAudioCapture:
                     if data_length == 0:
                         return
 
-                    # データをコピー
-                    data_pointer, length_out = CoreMedia.CMBlockBufferGetDataPointer(
-                        block_buffer, 0, None, None
+                    # CMBlockBufferGetDataPointer: (buffer, offset, lengthAtOffset, totalLength, dataPointer)
+                    # Returns: (status, lengthAtOffset, totalLength, dataPointer)
+                    result = CoreMedia.CMBlockBufferGetDataPointer(
+                        block_buffer, 0, None, None, None
                     )
 
-                    if data_pointer is not None and length_out > 0:
+                    # result is tuple: (status, lengthAtOffset, totalLength, dataPointer)
+                    if result is None or len(result) < 4:
+                        return
+
+                    status = result[0]
+                    total_length = result[2] if result[2] else data_length
+                    data_pointer = result[3]
+
+                    if status != 0 or data_pointer is None:
+                        return
+
+                    if total_length > 0:
                         # float32として解釈
                         import ctypes
-                        buffer = (ctypes.c_char * length_out).from_address(data_pointer)
+                        buffer = (ctypes.c_char * total_length).from_address(data_pointer)
                         audio_data = np.frombuffer(bytes(buffer), dtype=np.float32).copy()
 
                         if len(audio_data) > 0:
                             self._parent.audio_queue.put(audio_data)
 
                 except Exception as e:
-                    # CoreMedia関連のエラーは一度だけ表示
-                    if "CoreMedia" not in str(e):
+                    # エラーは一度だけ表示
+                    if not hasattr(self, '_error_shown'):
                         print(f"Audio processing error: {e}")
+                        self._error_shown = True
 
             def stream_didStopWithError_(self, stream, error):
                 """ストリームが停止 (SCStreamDelegate)"""
