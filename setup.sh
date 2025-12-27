@@ -1,6 +1,6 @@
 #!/bin/bash
-# whisper.cpp リアルタイム文字起こしセットアップスクリプト
-# Apple Silicon (M1/M2/M3) 向け最適化
+# whisper.cpp Real-time Transcription Setup Script
+# Optimized for Apple Silicon (M1/M2/M3/M4)
 
 set -e
 
@@ -8,35 +8,35 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WHISPER_DIR="$SCRIPT_DIR/whisper.cpp"
 MODELS_DIR="$SCRIPT_DIR/models"
 
-echo "=== whisper.cpp リアルタイム文字起こし セットアップ ==="
+echo "=== whisper.cpp Real-time Transcription Setup ==="
 echo ""
 
-# whisper.cppのクローンとビルド
+# Clone and build whisper.cpp
 setup_whisper_cpp() {
-    echo "[1/4] whisper.cpp のセットアップ..."
+    echo "[1/4] Setting up whisper.cpp..."
 
     if [ -d "$WHISPER_DIR" ]; then
-        echo "whisper.cpp は既にクローン済みです。更新します..."
+        echo "whisper.cpp already cloned. Updating..."
         cd "$WHISPER_DIR"
         git pull
     else
-        echo "whisper.cpp をクローン中..."
+        echo "Cloning whisper.cpp..."
         git clone https://github.com/ggerganov/whisper.cpp.git "$WHISPER_DIR"
         cd "$WHISPER_DIR"
     fi
 
-    echo "whisper.cpp をビルド中 (Apple Silicon 最適化)..."
+    echo "Building whisper.cpp (Apple Silicon optimized)..."
 
-    # SDL2が必要（streamコマンド用）
+    # SDL2 is required for stream command
     if ! brew list sdl2 &>/dev/null; then
-        echo "SDL2をインストール中..."
+        echo "Installing SDL2..."
         brew install sdl2
     fi
 
-    # ビルドディレクトリをクリーン
+    # Clean build directory
     rm -rf build 2>/dev/null || true
 
-    # CMakeでビルド（Apple Silicon + Metal GPU + SDL2 + examples）
+    # Build with CMake (Apple Silicon + Metal GPU + SDL2 + examples)
     # Note: Core ML is disabled because it requires generating .mlmodelc files
     # Metal GPU acceleration is used instead (automatically enabled on Apple Silicon)
     cmake -B build \
@@ -48,97 +48,98 @@ setup_whisper_cpp() {
     cmake --build build -j$(sysctl -n hw.ncpu) --config Release
 
     echo ""
-    echo "ビルドされたバイナリ:"
-    ls -la build/bin/ 2>/dev/null || echo "  (binディレクトリなし)"
+    echo "Built binaries:"
+    ls -la build/bin/ 2>/dev/null || echo "  (no bin directory)"
 
-    echo "whisper.cpp のビルド完了!"
+    echo "whisper.cpp build complete!"
 }
 
-# モデルのダウンロード
+# Download models
 download_models() {
     echo ""
-    echo "[2/4] モデルのダウンロード..."
+    echo "[2/4] Downloading models..."
 
     mkdir -p "$MODELS_DIR"
     cd "$WHISPER_DIR"
 
-    # 利用可能なモデル一覧
+    # Available models:
     # tiny.en, tiny, base.en, base, small.en, small, medium.en, medium, large-v1, large-v2, large-v3, large-v3-turbo
 
-    # デフォルトでbaseモデルをダウンロード（リアルタイム向けバランス型）
+    # Download base model by default (balanced for real-time)
     if [ ! -f "$MODELS_DIR/ggml-base.bin" ]; then
-        echo "ggml-base モデルをダウンロード中..."
+        echo "Downloading ggml-base model..."
         bash models/download-ggml-model.sh base
         cp models/ggml-base.bin "$MODELS_DIR/"
     else
-        echo "ggml-base モデルは既にダウンロード済みです"
+        echo "ggml-base model already downloaded"
     fi
 
-    # tinyモデルもダウンロード（最速、リアルタイム重視の場合）
+    # Also download tiny model (fastest, for real-time priority)
     if [ ! -f "$MODELS_DIR/ggml-tiny.bin" ]; then
-        echo "ggml-tiny モデルをダウンロード中..."
+        echo "Downloading ggml-tiny model..."
         bash models/download-ggml-model.sh tiny
         cp models/ggml-tiny.bin "$MODELS_DIR/"
     else
-        echo "ggml-tiny モデルは既にダウンロード済みです"
+        echo "ggml-tiny model already downloaded"
     fi
 
-    echo "モデルのダウンロード完了!"
+    echo "Model download complete!"
 }
 
-# Python環境のセットアップ (uv使用)
+# Setup Python environment using uv
 setup_python() {
     echo ""
-    echo "[3/4] Python環境のセットアップ (uv)..."
+    echo "[3/4] Setting up Python environment (uv)..."
 
     cd "$SCRIPT_DIR"
 
-    # uvがインストールされているか確認
+    # Check if uv is installed
     if ! command -v uv &> /dev/null; then
-        echo "uv がインストールされていません。インストール中..."
+        echo "uv is not installed. Installing..."
         curl -LsSf https://astral.sh/uv/install.sh | sh
-        # シェルを再読み込み
+        # Reload shell path
         export PATH="$HOME/.local/bin:$PATH"
     fi
 
-    echo "uv でプロジェクトをセットアップ中..."
+    echo "Setting up project with uv..."
     uv sync
 
-    echo "Python環境のセットアップ完了!"
+    echo "Python environment setup complete!"
 }
 
-# システム音声キャプチャの説明
+# Show audio setup information
 show_audio_setup_info() {
     echo ""
-    echo "[4/4] オーディオ設定について"
+    echo "[4/4] Audio Configuration"
     echo ""
-    echo "■ マイク入力:"
-    echo "  → 追加設定不要。そのまま使用できます。"
+    echo "■ Microphone Input:"
+    echo "  → No additional setup required. Ready to use."
     echo ""
-    echo "■ システム音声キャプチャ (macOS):"
+    echo "■ System Audio Capture (macOS):"
     echo ""
-    echo "  【方法1】ScreenCaptureKit (macOS 13+ 推奨)"
-    echo "    追加パッケージをインストール:"
-    echo "    uv pip install 'whisper-realtime[macos]'"
+    echo "  [Method 1] ScreenCaptureKit (macOS 13+ recommended)"
+    echo "    Install additional packages:"
+    echo "    uv pip install -e '.[macos]'"
     echo ""
-    echo "    ※ 初回実行時に画面録画の権限許可が必要です"
+    echo "    Note: Screen Recording permission is required on first run"
+    echo "    System Settings → Privacy & Security → Screen Recording"
     echo ""
-    echo "  【方法2】BlackHole (仮想オーディオデバイス)"
+    echo "  [Method 2] BlackHole (Virtual Audio Device)"
     echo "    brew install blackhole-2ch"
     echo ""
-    echo "    インストール後、Audio MIDI設定で「複数出力装置」を作成し、"
-    echo "    スピーカーとBlackHoleを両方追加してください。"
+    echo "    After installation, open Audio MIDI Setup and create"
+    echo "    a 'Multi-Output Device' with both speakers and BlackHole."
     echo ""
-    echo "    詳細: https://github.com/ExistentialAudio/BlackHole"
+    echo "    Details: https://github.com/ExistentialAudio/BlackHole"
     echo ""
 }
 
-# メイン処理
+# Main function
 main() {
-    echo "対象ディレクトリ: $SCRIPT_DIR"
+    echo "Target directory: $SCRIPT_DIR"
     echo ""
 
-    # 引数でスキップするステップを指定可能
+    # Arguments to skip steps
     SKIP_WHISPER=false
     SKIP_MODELS=false
     SKIP_PYTHON=false
@@ -162,20 +163,20 @@ main() {
                 shift 2
                 ;;
             --help)
-                echo "使い方: ./setup.sh [オプション]"
+                echo "Usage: ./setup.sh [options]"
                 echo ""
-                echo "オプション:"
-                echo "  --skip-whisper    whisper.cpp のビルドをスキップ"
-                echo "  --skip-models     モデルのダウンロードをスキップ"
-                echo "  --skip-python     Python環境のセットアップをスキップ"
-                echo "  --model <name>    追加モデルをダウンロード"
+                echo "Options:"
+                echo "  --skip-whisper    Skip whisper.cpp build"
+                echo "  --skip-models     Skip model download"
+                echo "  --skip-python     Skip Python environment setup"
+                echo "  --model <name>    Download additional model"
                 echo "                    (tiny, base, small, medium, large-v3, large-v3-turbo)"
-                echo "  --help            このヘルプを表示"
+                echo "  --help            Show this help"
                 exit 0
                 ;;
             *)
-                echo "不明なオプション: $1"
-                echo "ヘルプ: ./setup.sh --help"
+                echo "Unknown option: $1"
+                echo "Help: ./setup.sh --help"
                 exit 1
                 ;;
         esac
@@ -189,9 +190,9 @@ main() {
         download_models
     fi
 
-    # 追加モデルのダウンロード
+    # Download additional model if specified
     if [ -n "$EXTRA_MODEL" ]; then
-        echo "追加モデル ($EXTRA_MODEL) をダウンロード中..."
+        echo "Downloading additional model ($EXTRA_MODEL)..."
         cd "$WHISPER_DIR"
         bash models/download-ggml-model.sh "$EXTRA_MODEL"
         cp "models/ggml-$EXTRA_MODEL.bin" "$MODELS_DIR/"
@@ -203,16 +204,16 @@ main() {
 
     show_audio_setup_info
 
-    echo "=== セットアップ完了 ==="
+    echo "=== Setup Complete ==="
     echo ""
-    echo "使用方法:"
+    echo "Usage:"
     echo "  uv run whisper-realtime --help"
     echo ""
-    echo "または:"
-    echo "  uv run whisper-realtime start           # マイク入力で開始"
-    echo "  uv run whisper-realtime start -s system # システム音声で開始"
-    echo "  uv run whisper-realtime devices         # デバイス一覧"
-    echo "  uv run whisper-realtime models          # モデル一覧"
+    echo "Quick start:"
+    echo "  uv run whisper-realtime start           # Start with microphone"
+    echo "  uv run whisper-realtime start -s system # Start with system audio"
+    echo "  uv run whisper-realtime devices         # List audio devices"
+    echo "  uv run whisper-realtime models          # List available models"
     echo ""
 }
 

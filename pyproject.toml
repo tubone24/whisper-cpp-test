@@ -1,7 +1,7 @@
 [project]
 name = "whisper-realtime"
 version = "0.1.0"
-description = "リアルタイム音声文字起こし (whisper.cpp)"
+description = "Real-time speech transcription CLI using whisper.cpp"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -18,7 +18,7 @@ diarization = [
     "pyannote-audio>=3.0.0",
     "torch>=2.0.0",
 ]
-# macOSでScreenCaptureKitを使用したシステム音声キャプチャ
+# macOS system audio capture using ScreenCaptureKit
 macos = [
     "pyobjc-framework-ScreenCaptureKit>=10.0; sys_platform == 'darwin'",
     "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
