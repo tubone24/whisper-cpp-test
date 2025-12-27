@@ -124,9 +124,7 @@ class ScreenCaptureKitAudioCapture:
                 try:
                     # CoreMedia からデータを取得
                     import CoreMedia
-                    import AudioToolbox
-
-                    # AudioBufferListを使用してデータを取得
+                    import ctypes
                     block_buffer = CoreMedia.CMSampleBufferGetDataBuffer(sampleBuffer)
                     if block_buffer is None:
                         return
@@ -154,7 +152,6 @@ class ScreenCaptureKitAudioCapture:
 
                     if total_length > 0:
                         # float32として解釈
-                        import ctypes
                         buffer = (ctypes.c_char * total_length).from_address(data_pointer)
                         audio_data = np.frombuffer(bytes(buffer), dtype=np.float32).copy()
 
