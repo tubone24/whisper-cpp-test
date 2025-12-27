@@ -1,0 +1,480 @@
+#!/usr/bin/env python3
+"""
+whisper-realtime CLI
+リアルタイム音声文字起こしのコマンドラインインターフェース
+"""
+
+import signal
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Optional
+
+import click
+import numpy as np
+from rich.console import Console
+from rich.live import Live
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+
+from .audio_capture import AudioCapture, AudioConfig, AudioSource, VADFilter
+from .diarization import DiarizationManager
+from .whisper_engine import (
+    MODEL_PROFILES,
+    StreamingWhisperEngine,
+    WhisperConfig,
+    WhisperEngine,
+    WhisperModel,
+)
+
+console = Console()
+
+
+class RealtimeDisplay:
+    """リアルタイム表示マネージャー"""
+
+    def __init__(self, show_speaker: bool = False):
+        self.show_speaker = show_speaker
+        self.current_text = ""
+        self.partial_text = ""
+        self.finalized_lines: list[str] = []
+        self.current_speaker = ""
+        self._lock = threading.Lock()
+
+    def update(self, text: str, is_partial: bool = False, speaker: str = ""):
+        """テキストを更新"""
+        with self._lock:
+            if speaker:
+                self.current_speaker = speaker
+
+            if is_partial:
+                self.partial_text = text
+            else:
+                if self.partial_text:
+                    # 部分テキストが確定
+                    line = self.partial_text
+                    if self.show_speaker and self.current_speaker:
+                        line = f"[{self.current_speaker}] {line}"
+                    self.finalized_lines.append(line)
+                    self.partial_text = ""
+
+                if text and text != self.partial_text:
+                    line = text
+                    if self.show_speaker and self.current_speaker:
+                        line = f"[{self.current_speaker}] {line}"
+                    self.finalized_lines.append(line)
+
+    def render(self) -> Panel:
+        """表示用パネルを生成"""
+        with self._lock:
+            # 確定テキスト
+            content = Text()
+            for line in self.finalized_lines[-20:]:  # 最新20行
+                content.append(line + "\n")
+
+            # 部分テキスト（イタリック表示）
+            if self.partial_text:
+                partial = self.partial_text
+                if self.show_speaker and self.current_speaker:
+                    partial = f"[{self.current_speaker}] {partial}"
+                content.append(partial, style="italic dim")
+
+            if not content.plain:
+                content.append("(音声を待機中...)", style="dim")
+
+            return Panel(
+                content,
+                title="[bold green]リアルタイム文字起こし[/bold green]",
+                subtitle="[dim]Ctrl+C で終了[/dim]",
+                border_style="green",
+            )
+
+    def get_full_text(self) -> str:
+        """全テキストを取得"""
+        with self._lock:
+            lines = self.finalized_lines.copy()
+            if self.partial_text:
+                lines.append(self.partial_text)
+            return "\n".join(lines)
+
+
+def list_audio_devices():
+    """オーディオデバイス一覧を表示"""
+    devices = AudioCapture.list_devices()
+
+    table = Table(title="利用可能なオーディオデバイス")
+    table.add_column("ID", style="cyan")
+    table.add_column("名前", style="green")
+    table.add_column("チャンネル", style="yellow")
+    table.add_column("デフォルト", style="magenta")
+
+    for device in devices:
+        table.add_row(
+            str(device["id"]),
+            device["name"],
+            str(device["channels"]),
+            "★" if device["is_default"] else "",
+        )
+
+    console.print(table)
+
+    # BlackHole検出
+    blackhole_id = AudioCapture.find_blackhole_device()
+    if blackhole_id is not None:
+        console.print(f"\n[green]BlackHole検出: ID {blackhole_id}[/green]")
+        console.print("システム音声キャプチャが利用可能です")
+    else:
+        console.print("\n[yellow]BlackHoleが見つかりません[/yellow]")
+        console.print("システム音声をキャプチャするには: brew install blackhole-2ch")
+
+
+def list_models(models_path: Path):
+    """利用可能なモデル一覧を表示"""
+    table = Table(title="利用可能なWhisperモデル")
+    table.add_column("モデル", style="cyan")
+    table.add_column("サイズ", style="yellow")
+    table.add_column("ステータス", style="green")
+    table.add_column("推奨用途", style="magenta")
+
+    model_info = {
+        "tiny": ("~75MB", "最速、リアルタイム向け"),
+        "tiny.en": ("~75MB", "英語のみ、最速"),
+        "base": ("~142MB", "バランス型"),
+        "base.en": ("~142MB", "英語のみ、バランス"),
+        "small": ("~466MB", "高精度"),
+        "small.en": ("~466MB", "英語のみ、高精度"),
+        "medium": ("~1.5GB", "より高精度"),
+        "medium.en": ("~1.5GB", "英語のみ"),
+        "large-v1": ("~2.9GB", "最高精度"),
+        "large-v2": ("~2.9GB", "最高精度v2"),
+        "large-v3": ("~2.9GB", "最高精度v3"),
+        "large-v3-turbo": ("~1.5GB", "高精度+高速"),
+    }
+
+    for model in WhisperModel:
+        model_file = models_path / f"ggml-{model.value}.bin"
+        exists = model_file.exists()
+        size, usage = model_info.get(model.value, ("?", "?"))
+
+        table.add_row(
+            model.value,
+            size,
+            "[green]インストール済[/green]" if exists else "[dim]未インストール[/dim]",
+            usage,
+        )
+
+    console.print(table)
+    console.print("\nモデルのダウンロード:")
+    console.print("  ./setup.sh --model <model-name>")
+
+
+@click.group()
+def cli():
+    """whisper-realtime: リアルタイム音声文字起こし"""
+    pass
+
+
+@cli.command()
+def devices():
+    """オーディオデバイス一覧を表示"""
+    list_audio_devices()
+
+
+@cli.command()
+@click.option("--path", type=click.Path(exists=True), help="モデルディレクトリ")
+def models(path: Optional[str]):
+    """利用可能なモデル一覧を表示"""
+    models_path = Path(path) if path else Path(__file__).parent.parent / "models"
+    list_models(models_path)
+
+
+@cli.command()
+@click.option(
+    "--source", "-s",
+    type=click.Choice(["mic", "system", "both"]),
+    default="mic",
+    help="音声入力ソース",
+)
+@click.option(
+    "--model", "-m",
+    type=click.Choice([m.value for m in WhisperModel]),
+    default="base",
+    help="使用するWhisperモデル",
+)
+@click.option(
+    "--profile", "-p",
+    type=click.Choice(list(MODEL_PROFILES.keys())),
+    help="モデルプロファイル (realtime/balanced/quality/best)",
+)
+@click.option(
+    "--language", "-l",
+    default="ja",
+    help="言語コード (ja, en, auto)",
+)
+@click.option(
+    "--device", "-d",
+    type=int,
+    help="マイクデバイスID",
+)
+@click.option(
+    "--system-device",
+    type=int,
+    help="システム音声デバイスID (BlackHole)",
+)
+@click.option(
+    "--speaker/--no-speaker",
+    default=False,
+    help="話者分離を有効化",
+)
+@click.option(
+    "--translate/--no-translate",
+    default=False,
+    help="英語に翻訳",
+)
+@click.option(
+    "--output", "-o",
+    type=click.Path(),
+    help="出力ファイルパス",
+)
+@click.option(
+    "--step",
+    type=int,
+    default=500,
+    help="処理ステップ (ms)",
+)
+@click.option(
+    "--length",
+    type=int,
+    default=5000,
+    help="処理窓の長さ (ms)",
+)
+@click.option(
+    "--vad/--no-vad",
+    default=True,
+    help="音声区間検出を使用",
+)
+def start(
+    source: str,
+    model: str,
+    profile: Optional[str],
+    language: str,
+    device: Optional[int],
+    system_device: Optional[int],
+    speaker: bool,
+    translate: bool,
+    output: Optional[str],
+    step: int,
+    length: int,
+    vad: bool,
+):
+    """リアルタイム文字起こしを開始"""
+
+    # モデル設定
+    if profile:
+        whisper_model = MODEL_PROFILES[profile]
+    else:
+        whisper_model = WhisperModel(model)
+
+    # 設定表示
+    console.print(Panel.fit(
+        f"[bold]設定[/bold]\n"
+        f"モデル: {whisper_model.value}\n"
+        f"言語: {language}\n"
+        f"ソース: {source}\n"
+        f"話者分離: {'有効' if speaker else '無効'}\n"
+        f"処理ステップ: {step}ms\n"
+        f"処理窓: {length}ms",
+        title="whisper-realtime",
+        border_style="blue",
+    ))
+
+    # 音声ソース設定
+    audio_source = {
+        "mic": AudioSource.MICROPHONE,
+        "system": AudioSource.SYSTEM,
+        "both": AudioSource.BOTH,
+    }[source]
+
+    # Whisper設定
+    whisper_config = WhisperConfig(
+        model=whisper_model,
+        language=language,
+        translate=translate,
+        step_ms=step,
+        length_ms=length,
+    )
+
+    # 話者分離マネージャー
+    diarizer = DiarizationManager(use_pyannote=False) if speaker else None
+
+    # 表示マネージャー
+    display = RealtimeDisplay(show_speaker=speaker)
+
+    # VADフィルター
+    vad_filter = VADFilter() if vad else None
+
+    # 音声キャプチャ設定
+    audio_config = AudioConfig(
+        sample_rate=16000,
+        chunk_duration=step / 1000,
+    )
+
+    # 終了フラグ
+    running = True
+
+    def signal_handler(sig, frame):
+        nonlocal running
+        running = False
+        console.print("\n[yellow]終了中...[/yellow]")
+
+    signal.signal(signal.SIGINT, signal_handler)
+
+    # Whisperエンジン初期化
+    try:
+        engine = WhisperEngine(whisper_config)
+    except FileNotFoundError as e:
+        console.print(f"[red]エラー: {e}[/red]")
+        console.print("\n[yellow]setup.sh を実行してセットアップしてください[/yellow]")
+        sys.exit(1)
+
+    # 結果コールバック
+    def on_result(result):
+        text = result.text
+        is_partial = not result.is_final
+
+        if speaker and diarizer:
+            current_speaker = diarizer._current_speaker
+        else:
+            current_speaker = ""
+
+        display.update(text, is_partial=is_partial, speaker=current_speaker)
+
+    engine.set_callback(on_result)
+
+    # 音声キャプチャ開始
+    try:
+        audio_capture = AudioCapture(
+            config=audio_config,
+            source=audio_source,
+            device_id=device,
+            system_device_id=system_device,
+        )
+    except Exception as e:
+        console.print(f"[red]音声キャプチャエラー: {e}[/red]")
+        sys.exit(1)
+
+    console.print("\n[green]録音開始... (Ctrl+C で終了)[/green]\n")
+
+    try:
+        with audio_capture:
+            with Live(display.render(), console=console, refresh_per_second=4) as live:
+                while running:
+                    # 音声データを取得
+                    audio = audio_capture.get_audio(timeout=0.1)
+
+                    if audio is not None and len(audio) > 0:
+                        # VADフィルタリング
+                        if vad_filter:
+                            if not vad_filter.is_speech(audio):
+                                continue
+
+                        # 話者分離
+                        if speaker and diarizer:
+                            diarizer.process_audio(audio)
+
+                        # Whisperエンジンにデータ追加
+                        engine.add_audio(audio)
+
+                        # 十分なデータが溜まったら処理
+                        if engine.get_buffer_duration() >= length / 1000:
+                            engine.process_realtime()
+
+                    # 表示更新
+                    live.update(display.render())
+
+                # 最終処理
+                final = engine.finalize()
+                if final:
+                    display.update(final.text, is_partial=False)
+                    live.update(display.render())
+
+    except Exception as e:
+        console.print(f"[red]エラー: {e}[/red]")
+        import traceback
+        traceback.print_exc()
+
+    # 結果出力
+    full_text = display.get_full_text()
+
+    if output:
+        output_path = Path(output)
+        output_path.write_text(full_text, encoding="utf-8")
+        console.print(f"\n[green]出力保存: {output_path}[/green]")
+
+    console.print("\n[bold]文字起こし結果:[/bold]")
+    console.print(Panel(full_text or "(なし)", border_style="green"))
+
+
+@cli.command()
+@click.option(
+    "--model", "-m",
+    type=click.Choice([m.value for m in WhisperModel]),
+    default="base",
+    help="使用するWhisperモデル",
+)
+@click.option(
+    "--language", "-l",
+    default="ja",
+    help="言語コード",
+)
+@click.option(
+    "--device", "-d",
+    type=int,
+    help="オーディオデバイスID",
+)
+def stream(model: str, language: str, device: Optional[int]):
+    """
+    whisper.cpp stream を使用したストリーミング文字起こし
+    (whisper.cpp の stream バイナリが必要)
+    """
+
+    whisper_model = WhisperModel(model)
+    config = WhisperConfig(model=whisper_model, language=language)
+
+    display = RealtimeDisplay()
+
+    def on_text(text: str, is_partial: bool):
+        display.update(text, is_partial=is_partial)
+
+    console.print("[green]ストリーミング開始... (Ctrl+C で終了)[/green]\n")
+
+    try:
+        engine = StreamingWhisperEngine(config)
+        engine.set_callback(on_text)
+
+        with Live(display.render(), console=console, refresh_per_second=4) as live:
+            engine.start(capture_id=device)
+
+            while engine.is_running:
+                time.sleep(0.1)
+                live.update(display.render())
+
+    except FileNotFoundError as e:
+        console.print(f"[red]エラー: {e}[/red]")
+        console.print("\n[yellow]whisper.cpp の stream バイナリをビルドしてください[/yellow]")
+    except KeyboardInterrupt:
+        pass
+
+    console.print("\n[bold]結果:[/bold]")
+    console.print(display.get_full_text())
+
+
+def main():
+    """エントリーポイント"""
+    cli()
+
+
+if __name__ == "__main__":
+    main()
