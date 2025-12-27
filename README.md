@@ -1,181 +1,366 @@
 # whisper-realtime
 
-whisper.cpp を使用したリアルタイム音声文字起こし CLI ツール。
-Apple Silicon (M1/M2/M3) Mac 向けに最適化されています。
+A real-time speech transcription CLI tool using whisper.cpp, optimized for Apple Silicon (M1/M2/M3/M4) Macs.
 
-## 機能
+## Features
 
-- リアルタイム音声文字起こし（テキストが随時更新される体験）
-- 複数の音声入力ソース対応
-  - マイク入力
-  - システム音声（BlackHole経由）
-  - 両方同時
-- モデル選択可能（リアルタイム性 vs 精度のトレードオフ）
-- 話者分離機能（簡易版 / pyannote.audio連携）
-- CLIベースのシンプルなインターフェース
+- **Real-time transcription** with live text updates and corrections
+- **Multiple audio input sources**:
+  - Microphone input
+  - System audio (via ScreenCaptureKit - no BlackHole required on macOS 13+)
+  - Both simultaneously
+- **Speaker diarization** with color-coded labels
+- **Stacked conversation display** - history at top, live transcription at bottom
+- **Model selection** for speed vs accuracy trade-offs
+- **Metal GPU acceleration** for Apple Silicon
 
-## 必要環境
+## Architecture
 
-- macOS (Apple Silicon)
+```mermaid
+graph TB
+    subgraph Input Sources
+        MIC[🎤 Microphone]
+        SYS[🔊 System Audio]
+    end
+
+    subgraph Audio Capture Layer
+        SD[sounddevice]
+        SCK[ScreenCaptureKit<br/>macOS 13+]
+        BH[BlackHole<br/>Fallback]
+    end
+
+    subgraph Processing Pipeline
+        AC[AudioCapture]
+        VAD[VAD Filter<br/>Voice Activity Detection]
+        DIAR[Speaker Diarization]
+        WE[WhisperEngine]
+    end
+
+    subgraph whisper.cpp
+        MODEL[GGML Model]
+        METAL[Metal GPU]
+    end
+
+    subgraph Output
+        CLI[Rich CLI Display]
+        FILE[File Output]
+    end
+
+    MIC --> SD
+    SYS --> SCK
+    SYS --> BH
+
+    SD --> AC
+    SCK --> AC
+    BH --> AC
+
+    AC --> VAD
+    VAD --> DIAR
+    DIAR --> WE
+
+    WE --> MODEL
+    MODEL --> METAL
+
+    WE --> CLI
+    WE --> FILE
+```
+
+## System Audio Capture Flow
+
+```mermaid
+sequenceDiagram
+    participant App as whisper-realtime
+    participant SCK as ScreenCaptureKit
+    participant CM as CoreMedia
+    participant Queue as Audio Queue
+
+    App->>SCK: Initialize SCStream
+    App->>SCK: Configure audio capture
+    App->>SCK: Start capture
+
+    loop Audio Streaming
+        SCK->>App: stream_didOutputSampleBuffer_ofType_
+        App->>CM: CMSampleBufferGetDataBuffer
+        CM-->>App: CMBlockBuffer
+        App->>CM: CMBlockBufferCopyDataBytes
+        CM-->>App: Audio data (float32)
+        App->>Queue: Put audio chunk
+    end
+
+    Queue->>App: Get audio for transcription
+    App->>App: Process with Whisper
+```
+
+## Requirements
+
+- macOS 13.0+ (Ventura or later) for ScreenCaptureKit
+- Apple Silicon Mac (M1/M2/M3/M4)
 - Python 3.10+
-- [uv](https://docs.astral.sh/uv/) (パッケージマネージャー)
-- C++ コンパイラ (Xcode Command Line Tools)
+- [uv](https://docs.astral.sh/uv/) package manager
+- Xcode Command Line Tools
 
-## セットアップ
+## Installation
 
 ```bash
-# リポジトリをクローン
+# Clone the repository
 git clone <repository-url>
 cd whisper-cpp-test
 
-# セットアップスクリプトを実行
+# Run setup script
 chmod +x setup.sh
 ./setup.sh
 ```
 
-セットアップスクリプトは以下を行います：
-1. whisper.cpp のクローンとビルド（Apple Silicon最適化）
-2. デフォルトモデル（tiny, base）のダウンロード
-3. Python依存パッケージのインストール（uv使用）
+The setup script will:
+1. Clone and build whisper.cpp with Metal acceleration
+2. Download default models (tiny, base)
+3. Install Python dependencies via uv
 
-### 追加モデルのダウンロード
+### Install macOS Extras (for System Audio)
+
+For system audio capture without BlackHole:
 
 ```bash
-# より高精度なモデルを追加
+uv pip install -e '.[macos]'
+```
+
+Then grant **Screen Recording** permission:
+- Open **System Settings** → **Privacy & Security** → **Screen Recording**
+- Enable permission for your terminal app (Terminal, iTerm2, etc.)
+
+### Download Additional Models
+
+```bash
+# Download higher accuracy models
 ./setup.sh --skip-whisper --skip-python --model small
 ./setup.sh --skip-whisper --skip-python --model large-v3-turbo
 ```
 
-### システム音声キャプチャの設定
+## Usage
 
-システム音声（ブラウザの音声、Zoomの相手の声など）をキャプチャするには、BlackHoleが必要です：
-
-```bash
-brew install blackhole-2ch
-```
-
-インストール後：
-1. 「Audio MIDI設定」を開く（Spotlight で検索）
-2. 左下の「+」→「複数出力装置を作成」
-3. スピーカーとBlackHole 2chの両方にチェック
-4. この複数出力装置をシステムの出力デバイスに設定
-
-## 使い方
-
-### 基本コマンド
+### Basic Commands
 
 ```bash
-# ヘルプを表示
+# Show help
 uv run whisper-realtime --help
 
-# マイク入力でリアルタイム文字起こし開始
+# Start transcription with microphone
 uv run whisper-realtime start
 
-# システム音声をキャプチャ
+# Capture system audio (YouTube, Zoom, etc.)
 uv run whisper-realtime start -s system
 
-# マイクとシステム音声の両方
+# Capture both microphone and system audio
 uv run whisper-realtime start -s both
 
-# デバイス一覧を表示
+# List audio devices
 uv run whisper-realtime devices
 
-# 利用可能なモデル一覧
+# List available models
 uv run whisper-realtime models
 ```
 
-### 詳細オプション
+### Advanced Options
 
 ```bash
-# モデルを指定（リアルタイム性重視）
-uv run whisper-realtime start -m tiny
+# Use specific model
+uv run whisper-realtime start -m large-v3-turbo
 
-# プロファイルを使用
-uv run whisper-realtime start -p realtime  # 最速
-uv run whisper-realtime start -p balanced  # バランス
-uv run whisper-realtime start -p quality   # 高精度
+# Use profile presets
+uv run whisper-realtime start -p realtime  # Fastest
+uv run whisper-realtime start -p balanced  # Balance
+uv run whisper-realtime start -p quality   # High accuracy
 
-# 言語を指定
-uv run whisper-realtime start -l ja  # 日本語（デフォルト）
-uv run whisper-realtime start -l en  # 英語
-uv run whisper-realtime start -l auto  # 自動検出
+# Specify language
+uv run whisper-realtime start -l ja   # Japanese (default)
+uv run whisper-realtime start -l en   # English
+uv run whisper-realtime start -l auto # Auto-detect
 
-# 話者分離を有効化
+# Enable speaker diarization
 uv run whisper-realtime start --speaker
 
-# 特定のデバイスを使用
-uv run whisper-realtime start -d 2  # デバイスID 2
+# Save output to file
+uv run whisper-realtime start -o transcript.txt
 
-# 結果をファイルに保存
-uv run whisper-realtime start -o output.txt
+# Debug mode (show audio levels)
+uv run whisper-realtime start --debug
 
-# 処理パラメータを調整
+# Adjust processing parameters
 uv run whisper-realtime start --step 300 --length 3000
 ```
 
-### whisper.cpp stream モード
-
-whisper.cpp の stream バイナリを直接使用するモード：
+### Test Microphone
 
 ```bash
-uv run whisper-realtime stream -m base
+uv run whisper-realtime test-mic
 ```
 
-## モデル一覧
+## Models
 
-| モデル | サイズ | 用途 |
-|--------|--------|------|
-| tiny | ~75MB | 最速、リアルタイム向け |
-| base | ~142MB | バランス型（デフォルト） |
-| small | ~466MB | 高精度 |
-| medium | ~1.5GB | より高精度 |
-| large-v3 | ~2.9GB | 最高精度 |
-| large-v3-turbo | ~1.5GB | 高精度 + 高速 |
+| Model | Size | Use Case |
+|-------|------|----------|
+| tiny | ~75MB | Fastest, real-time priority |
+| base | ~142MB | Balanced (default) |
+| small | ~466MB | Higher accuracy |
+| medium | ~1.5GB | High accuracy |
+| large-v3 | ~2.9GB | Maximum accuracy |
+| large-v3-turbo | ~1.5GB | High accuracy + speed |
 
-リアルタイム性が重要な場合は `tiny` または `base` を推奨。
+For real-time applications, `tiny` or `base` is recommended.
 
-## オプション詳細
+## CLI Options
 
-| オプション | 説明 |
-|------------|------|
-| `-s, --source` | 音声ソース: `mic`, `system`, `both` |
-| `-m, --model` | Whisperモデル名 |
-| `-p, --profile` | プリセット: `realtime`, `balanced`, `quality`, `best` |
-| `-l, --language` | 言語コード (ja, en, auto) |
-| `-d, --device` | マイクデバイスID |
-| `--system-device` | システム音声デバイスID |
-| `--speaker/--no-speaker` | 話者分離の有効/無効 |
-| `--translate/--no-translate` | 英語への翻訳 |
-| `-o, --output` | 出力ファイルパス |
-| `--step` | 処理ステップ（ミリ秒） |
-| `--length` | 処理窓の長さ（ミリ秒） |
-| `--vad/--no-vad` | 音声区間検出 |
+| Option | Description |
+|--------|-------------|
+| `-s, --source` | Audio source: `mic`, `system`, `both` |
+| `-m, --model` | Whisper model name |
+| `-p, --profile` | Preset: `realtime`, `balanced`, `quality`, `best` |
+| `-l, --language` | Language code (ja, en, auto) |
+| `-d, --device` | Microphone device ID |
+| `--system-device` | System audio device ID |
+| `--speaker` | Enable speaker diarization |
+| `--translate` | Translate to English |
+| `-o, --output` | Output file path |
+| `--step` | Processing step (ms) |
+| `--length` | Processing window length (ms) |
+| `--vad/--no-vad` | Voice activity detection |
+| `--debug` | Show debug information |
 
-## トラブルシューティング
+## System Audio Capture
 
-### whisper.cpp のビルドに失敗する
+### Method 1: ScreenCaptureKit (Recommended)
 
-Xcode Command Line Tools がインストールされているか確認：
+Available on macOS 13.0+ without any additional software:
+
+```bash
+# Install macOS dependencies
+uv pip install -e '.[macos]'
+
+# Grant Screen Recording permission in System Settings
+
+# Use system audio
+uv run whisper-realtime start -s system
+```
+
+**Requirements:**
+- macOS 13.0 (Ventura) or later
+- Screen Recording permission granted
+- pyobjc-framework-ScreenCaptureKit installed
+
+### Method 2: BlackHole (Fallback)
+
+For older macOS versions or as fallback:
+
+```bash
+# Install BlackHole
+brew install blackhole-2ch
+```
+
+After installation:
+1. Open **Audio MIDI Setup** (search in Spotlight)
+2. Click **+** at bottom left → **Create Multi-Output Device**
+3. Check both your speakers and **BlackHole 2ch**
+4. Set this multi-output device as system output in Sound settings
+
+## Display Layout
+
+The CLI provides a stacked display with conversation history and live transcription:
+
+```
+╭──────────── Conversation History ────────────╮
+│ [Speaker 1] Hello, how are you today?        │
+│ [Speaker 2] I'm doing great, thanks!         │
+│ [Speaker 1] That's wonderful to hear.        │
+╰──────────────────────────────────────────────╯
+╭──────────── Live Transcription ──────────────╮
+│ [Speaker 2] Yes, I was thinking about...     │
+│                              Ctrl+C to exit  │
+╰──────────────────────────────────────────────╯
+```
+
+## Speaker Diarization
+
+When `--speaker` is enabled:
+- Up to 4 speakers are tracked
+- Each speaker gets a unique color
+- Speakers are identified by audio features (energy, zero-crossing rate)
+
+```bash
+uv run whisper-realtime start --speaker -s both
+```
+
+## Troubleshooting
+
+### whisper.cpp build fails
+
+Ensure Xcode Command Line Tools are installed:
 
 ```bash
 xcode-select --install
 ```
 
-### モデルが見つからない
+### Model not found
+
+Re-run model download:
 
 ```bash
 ./setup.sh --skip-whisper --skip-python
 ```
 
-### BlackHoleが認識されない
+### ScreenCaptureKit not working
 
-Audio MIDI設定で複数出力装置が正しく設定されているか確認してください。
+1. Ensure macOS 13.0+ is installed
+2. Check Screen Recording permission:
+   - System Settings → Privacy & Security → Screen Recording
+   - Enable for your terminal app
+3. Restart terminal after granting permission
+4. Install macOS extras: `uv pip install -e '.[macos]'`
 
-### 音声が認識されない
+### No audio detected
 
-1. システム環境設定でマイクのアクセス許可を確認
-2. ターミナルアプリにマイクアクセスを許可
+1. Check microphone permission in System Settings
+2. Run `uv run whisper-realtime test-mic` to verify
+3. Check `uv run whisper-realtime devices` for correct device ID
 
-## ライセンス
+### System audio not captured
+
+1. For ScreenCaptureKit: Ensure Screen Recording permission is granted
+2. For BlackHole: Verify multi-output device is set as system output
+3. Make sure audio is actually playing in another app
+
+## Project Structure
+
+```
+whisper-cpp-test/
+├── src/
+│   ├── cli.py                 # CLI entry point
+│   ├── audio_capture.py       # Audio input handling
+│   ├── system_audio_capture.py # ScreenCaptureKit implementation
+│   ├── whisper_engine.py      # Whisper transcription engine
+│   └── diarization.py         # Speaker diarization
+├── whisper.cpp/               # whisper.cpp submodule
+├── models/                    # GGML model files
+├── setup.sh                   # Setup script
+├── pyproject.toml             # Python project config
+└── README.md
+```
+
+## Dependencies
+
+### Core
+- sounddevice - Audio capture
+- numpy - Audio processing
+- rich - CLI display
+- click - CLI framework
+
+### macOS (Optional)
+- pyobjc-framework-ScreenCaptureKit - System audio capture
+- pyobjc-framework-CoreMedia - Audio buffer handling
+
+### Speaker Diarization (Optional)
+- pyannote-audio - Advanced speaker diarization
+- torch - PyTorch backend
+
+## License
 
 MIT License
