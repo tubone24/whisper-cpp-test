@@ -25,17 +25,78 @@ class SpeakerSegment:
 class SimpleSpeakerTracker:
     """
     シンプルな話者追跡
-    音声のエネルギー変化に基づく簡易的な話者変更検出
+    音声特徴（ピッチ、エネルギー）に基づく話者変更検出
     """
 
-    def __init__(self, min_silence_duration: float = 0.5, energy_threshold: float = 0.01):
+    def __init__(
+        self,
+        min_silence_duration: float = 1.0,
+        energy_threshold: float = 0.01,
+        max_speakers: int = 4,
+    ):
         self.min_silence_duration = min_silence_duration
         self.energy_threshold = energy_threshold
+        self.max_speakers = max_speakers
+
         self.current_speaker = 0
-        self.speaker_count = 1
         self._last_speech_time = 0
         self._silence_start = 0
         self._in_silence = False
+
+        # 話者プロファイル（平均ピッチとエネルギー）
+        self._speaker_profiles: list[dict] = []
+        self._current_features: list[dict] = []  # 現在の発話の特徴
+        self._feature_window = 10  # 特徴を平均化するウィンドウサイズ
+
+    def _extract_features(self, audio: np.ndarray, sample_rate: int = 16000) -> dict:
+        """音声から特徴を抽出"""
+        # RMSエネルギー
+        energy = np.sqrt(np.mean(audio ** 2))
+
+        # 簡易ピッチ推定（ゼロ交差率）
+        zero_crossings = np.sum(np.abs(np.diff(np.sign(audio)))) / 2
+        zcr = zero_crossings / len(audio) * sample_rate
+
+        return {"energy": energy, "zcr": zcr}
+
+    def _match_speaker(self, features: dict) -> int:
+        """特徴から最も近い話者を見つける"""
+        if not self._speaker_profiles:
+            return 0
+
+        # 各話者との距離を計算
+        min_distance = float("inf")
+        best_speaker = 0
+
+        for i, profile in enumerate(self._speaker_profiles):
+            # 特徴の正規化距離
+            energy_diff = abs(features["energy"] - profile["energy"]) / max(profile["energy"], 0.001)
+            zcr_diff = abs(features["zcr"] - profile["zcr"]) / max(profile["zcr"], 1)
+            distance = energy_diff + zcr_diff
+
+            if distance < min_distance:
+                min_distance = distance
+                best_speaker = i
+
+        # 閾値を超えたら新しい話者の可能性
+        if min_distance > 1.5 and len(self._speaker_profiles) < self.max_speakers:
+            return len(self._speaker_profiles)  # 新しい話者
+
+        return best_speaker
+
+    def _update_profile(self, speaker_id: int, features: dict):
+        """話者プロファイルを更新"""
+        while len(self._speaker_profiles) <= speaker_id:
+            self._speaker_profiles.append({"energy": 0, "zcr": 0, "count": 0})
+
+        profile = self._speaker_profiles[speaker_id]
+        count = profile["count"]
+
+        # 移動平均で更新
+        alpha = 0.3 if count < 5 else 0.1
+        profile["energy"] = profile["energy"] * (1 - alpha) + features["energy"] * alpha
+        profile["zcr"] = profile["zcr"] * (1 - alpha) + features["zcr"] * alpha
+        profile["count"] = count + 1
 
     def process_audio(self, audio: np.ndarray, sample_rate: int = 16000) -> int:
         """
@@ -48,31 +109,48 @@ class SimpleSpeakerTracker:
         Returns:
             話者ID（0から始まる整数）
         """
-        # RMSエネルギーを計算
-        energy = np.sqrt(np.mean(audio ** 2))
+        features = self._extract_features(audio, sample_rate)
         current_time = time.time()
 
-        if energy < self.energy_threshold:
+        if features["energy"] < self.energy_threshold:
             # 無音検出
             if not self._in_silence:
                 self._silence_start = current_time
                 self._in_silence = True
+
+                # 無音になったら、現在の特徴をプロファイルに反映
+                if self._current_features:
+                    avg_features = {
+                        "energy": np.mean([f["energy"] for f in self._current_features]),
+                        "zcr": np.mean([f["zcr"] for f in self._current_features]),
+                    }
+                    self._update_profile(self.current_speaker, avg_features)
+                    self._current_features = []
         else:
             # 発話検出
             if self._in_silence:
                 silence_duration = current_time - self._silence_start
+
                 if silence_duration > self.min_silence_duration:
-                    # 長い無音の後 = 話者交代の可能性
-                    self.speaker_count += 1
-                    self.current_speaker = (self.current_speaker + 1) % self.speaker_count
+                    # 長い無音の後 = 話者変更の可能性を検討
+                    matched_speaker = self._match_speaker(features)
+                    self.current_speaker = matched_speaker
+                    self._current_features = []
+
                 self._in_silence = False
+
+            # 現在の特徴を蓄積
+            self._current_features.append(features)
+            if len(self._current_features) > self._feature_window:
+                self._current_features.pop(0)
+
             self._last_speech_time = current_time
 
         return self.current_speaker
 
     def get_speaker_label(self, speaker_id: int) -> str:
         """話者ラベルを取得"""
-        return f"Speaker {speaker_id + 1}"
+        return f"話者{speaker_id + 1}"
 
 
 class PyAnnoteSpeakerDiarizer:
