@@ -36,9 +36,11 @@ setup_whisper_cpp() {
     # ビルドディレクトリをクリーン
     rm -rf build 2>/dev/null || true
 
-    # CMakeでビルド（Apple Silicon + Core ML最適化 + SDL2 + examples）
+    # CMakeでビルド（Apple Silicon + Metal GPU + SDL2 + examples）
+    # Note: Core ML is disabled because it requires generating .mlmodelc files
+    # Metal GPU acceleration is used instead (automatically enabled on Apple Silicon)
     cmake -B build \
-        -DWHISPER_COREML=1 \
+        -DWHISPER_METAL=ON \
         -DWHISPER_SDL2=ON \
         -DWHISPER_BUILD_EXAMPLES=ON \
         -DCMAKE_BUILD_TYPE=Release
