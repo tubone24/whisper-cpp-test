@@ -2,12 +2,16 @@
 
 A real-time speech transcription CLI tool using whisper.cpp, optimized for Apple Silicon (M1/M2/M3/M4) Macs.
 
+## DEMO
+
+![demo](./docs/images/demo.gif)
+
 ## Features
 
 - **Real-time transcription** with live text updates and corrections
 - **Multiple audio input sources**:
   - Microphone input
-  - System audio (via ScreenCaptureKit - no BlackHole required on macOS 13+)
+  - System audio (via ScreenCaptureKit)
   - Both simultaneously
 - **Speaker diarization** with color-coded labels
 - **Stacked conversation display** - history at top, live transcription at bottom
@@ -103,11 +107,10 @@ sequenceDiagram
 
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/tubone24/whisper-cpp-test
 cd whisper-cpp-test
 
 # Run setup script
-chmod +x setup.sh
 ./setup.sh
 ```
 
