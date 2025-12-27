@@ -82,8 +82,11 @@ class WhisperEngine:
         self._buffer: list[np.ndarray] = []
         self._buffer_lock = threading.Lock()
         self._last_result = ""
+        self._last_result_time = 0.0
+        self._pending_text = ""  # 確定待ちのテキスト
         self._results: list[TranscriptionResult] = []
         self._callback: Optional[Callable[[TranscriptionResult], None]] = None
+        self._finalize_delay = 2.0  # 2秒変化なしで確定
 
     def _setup_paths(self):
         """パスの設定"""
@@ -248,15 +251,51 @@ class WhisperEngine:
         result = self.transcribe_audio(audio)
 
         if result:
-            # 前回と比較して差分を検出（訂正機能）
-            if self._last_result and result.text.startswith(self._last_result):
-                # 追加のみ
-                result.is_final = False
+            current_time = time.time()
+
+            # 前回の確定待ちテキストがあり、時間が経過していたら確定
+            if self._pending_text and (current_time - self._last_result_time) > self._finalize_delay:
+                # 確定待ちテキストを確定
+                final_result = TranscriptionResult(
+                    text=self._pending_text,
+                    start_time=self._last_result_time,
+                    end_time=current_time,
+                    is_final=True,
+                )
+                self._results.append(final_result)
+                if self._callback:
+                    self._callback(final_result)
+                self._pending_text = ""
+                self._last_result = ""
+
+            # 前回の結果と比較
+            if self._last_result:
+                if result.text.startswith(self._last_result) or self._last_result.startswith(result.text):
+                    # 追加または訂正中（部分結果）
+                    result.is_final = False
+                    self._pending_text = result.text
+                else:
+                    # 新しいセグメント開始 → 前回を確定
+                    if self._pending_text:
+                        final_result = TranscriptionResult(
+                            text=self._pending_text,
+                            start_time=self._last_result_time,
+                            end_time=current_time,
+                            is_final=True,
+                        )
+                        self._results.append(final_result)
+                        if self._callback:
+                            self._callback(final_result)
+                    # 新しいテキストは部分結果として開始
+                    result.is_final = False
+                    self._pending_text = result.text
             else:
-                # 訂正あり
+                # 最初の結果は部分結果として開始
                 result.is_final = False
+                self._pending_text = result.text
 
             self._last_result = result.text
+            self._last_result_time = current_time
             self._results.append(result)
 
             if self._callback:
@@ -270,6 +309,21 @@ class WhisperEngine:
 
     def finalize(self) -> Optional[TranscriptionResult]:
         """残りのバッファを処理して最終結果を返す"""
+        # 確定待ちテキストがあれば確定
+        if self._pending_text:
+            final_result = TranscriptionResult(
+                text=self._pending_text,
+                start_time=self._last_result_time,
+                end_time=time.time(),
+                is_final=True,
+            )
+            self._results.append(final_result)
+            if self._callback:
+                self._callback(final_result)
+            self._pending_text = ""
+            return final_result
+
+        # バッファに残っている音声があれば処理
         audio = self._get_buffer_audio()
         if len(audio) > 0:
             result = self.transcribe_audio(audio)
