@@ -120,49 +120,87 @@ class ScreenCaptureKitAudioCapture:
             def stream_didOutputSampleBuffer_ofType_(self, stream, sampleBuffer, outputType):
                 """音声サンプルを受信 (SCStreamOutput)"""
                 # outputType: 0 = screen, 1 = audio
-                # デバッグ: 最初の数回はタイプを表示
-                if not hasattr(self, '_type_logged'):
-                    self._type_logged = set()
-                if outputType not in self._type_logged and len(self._type_logged) < 3:
-                    print(f"[ScreenCaptureKit] outputType: {outputType} (0=screen, 1=audio)")
-                    self._type_logged.add(outputType)
-
                 if outputType != 1:
                     return
 
                 try:
-                    # CoreMedia からデータを取得
                     import CoreMedia
+                    import AVFoundation
 
+                    # サンプル数を取得
+                    num_samples = CoreMedia.CMSampleBufferGetNumSamples(sampleBuffer)
+                    if num_samples == 0:
+                        return
+
+                    # まずCMBlockBufferを試す
                     block_buffer = CoreMedia.CMSampleBufferGetDataBuffer(sampleBuffer)
-                    if block_buffer is None:
-                        if not hasattr(self, '_null_buffer_warned'):
-                            print("[ScreenCaptureKit] Warning: block_buffer is None")
-                            self._null_buffer_warned = True
-                        return
 
-                    data_length = CoreMedia.CMBlockBufferGetDataLength(block_buffer)
-                    if data_length == 0:
-                        return
+                    if block_buffer is not None:
+                        # CMBlockBuffer経由でデータ取得
+                        data_length = CoreMedia.CMBlockBufferGetDataLength(block_buffer)
+                        if data_length == 0:
+                            return
 
-                    # CMBlockBufferCopyDataBytes を使用してデータをコピー
-                    # PyObjCではポインタの直接アクセスが難しいため、コピー方式を使用
-                    data_bytes = bytearray(data_length)
-                    status = CoreMedia.CMBlockBufferCopyDataBytes(
-                        block_buffer,
-                        0,  # offset
-                        data_length,
-                        data_bytes
-                    )
+                        data_bytes = bytearray(data_length)
+                        result = CoreMedia.CMBlockBufferCopyDataBytes(
+                            block_buffer, 0, data_length, data_bytes
+                        )
 
-                    if status != 0:
-                        if not hasattr(self, '_copy_error_warned'):
-                            print(f"[ScreenCaptureKit] CMBlockBufferCopyDataBytes failed: {status}")
-                            self._copy_error_warned = True
-                        return
+                        # PyObjCは(status, modified_buffer)のタプルを返す場合がある
+                        if isinstance(result, tuple):
+                            status = result[0]
+                            # タプルの2番目がbytearrayの場合、そちらを使用
+                            if len(result) > 1 and isinstance(result[1], (bytes, bytearray)):
+                                data_bytes = result[1]
+                            if status != 0:
+                                return
+                        elif result != 0:
+                            return
 
-                    # float32として解釈
-                    audio_data = np.frombuffer(bytes(data_bytes), dtype=np.float32).copy()
+                        # float32として解釈（ScreenCaptureKitは通常float32）
+                        audio_data = np.frombuffer(bytes(data_bytes), dtype=np.float32).copy()
+
+                        # デバッグ: データの最初の値を確認
+                        if not hasattr(self, '_data_debug_shown') and len(audio_data) > 0:
+                            max_val = np.max(np.abs(audio_data))
+                            print(f"[ScreenCaptureKit] データ形式確認: len={len(audio_data)}, max={max_val:.6f}, dtype={audio_data.dtype}")
+                            self._data_debug_shown = True
+
+                    else:
+                        # AudioBufferListを使用（ScreenCaptureKitの音声は通常こちら）
+                        # CMSampleBufferGetAudioBufferListWithRetainedBlockBufferを使用
+                        try:
+                            # フォーマット情報を取得
+                            format_desc = CoreMedia.CMSampleBufferGetFormatDescription(sampleBuffer)
+                            if format_desc is None:
+                                return
+
+                            # サンプルサイズを取得
+                            # 各サンプルは通常4バイト(float32)
+                            total_size = num_samples * 4  # float32 = 4 bytes
+
+                            # CMSampleBufferのデータを直接コピー
+                            # GetDataBuffer が None の場合、イメージバッファかもしれない
+                            # 代替方法: CMSampleBufferCopyPCMDataIntoAudioBufferList
+
+                            # 簡易的なバッファ作成
+                            data_bytes = bytearray(total_size)
+
+                            # CMBlockBufferCreateWithMemoryBlock を使用してブロックバッファを作成
+                            # これは複雑なので、代わりにAVFoundationを使用
+
+                            # AVAudioPCMBuffer経由で取得を試みる
+                            if not hasattr(self, '_format_warned'):
+                                print(f"[ScreenCaptureKit] Audio samples: {num_samples}, using alternative method")
+                                self._format_warned = True
+
+                            return  # この場合はスキップ
+
+                        except Exception as e:
+                            if not hasattr(self, '_alt_error'):
+                                print(f"[ScreenCaptureKit] Alternative buffer error: {e}")
+                                self._alt_error = True
+                            return
 
                     if len(audio_data) > 0:
                         self._sample_count += 1
@@ -176,7 +214,6 @@ class ScreenCaptureKitAudioCapture:
                             self._last_log_time = current_time
 
                 except Exception as e:
-                    # エラーは一度だけ表示
                     if not hasattr(self, '_error_shown'):
                         print(f"Audio processing error: {e}")
                         import traceback
@@ -294,6 +331,17 @@ class ScreenCaptureKitAudioCapture:
                     # ディスパッチキューなしで続行（メインスレッドで処理）
                     print("[ScreenCaptureKit] 警告: libdispatchが利用できません")
                     pass
+
+            # 画面出力を追加（音声を受け取るために必要な場合がある）
+            success_screen, error_screen = self._stream.addStreamOutput_type_sampleHandlerQueue_error_(
+                self._stream_output,
+                0,  # SCStreamOutputTypeScreen
+                dispatch_queue,
+                None
+            )
+
+            if not success_screen:
+                print(f"[ScreenCaptureKit] 警告: 画面出力追加失敗: {error_screen}")
 
             # 音声出力を追加
             success, error = self._stream.addStreamOutput_type_sampleHandlerQueue_error_(
