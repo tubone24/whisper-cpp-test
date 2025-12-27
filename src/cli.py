@@ -183,6 +183,62 @@ def devices():
 
 
 @cli.command()
+@click.option("--device", "-d", type=int, help="マイクデバイスID")
+@click.option("--duration", type=int, default=5, help="テスト時間（秒）")
+def test_mic(device: Optional[int], duration: int):
+    """マイク入力をテスト（音声レベルを表示）"""
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+
+    audio_config = AudioConfig(sample_rate=16000, chunk_duration=0.1)
+
+    console.print(f"[bold]マイクテスト[/bold] ({duration}秒間)")
+    console.print("話しかけてください...\n")
+
+    try:
+        audio_capture = AudioCapture(
+            config=audio_config,
+            source=AudioSource.MICROPHONE,
+            device_id=device,
+        )
+    except Exception as e:
+        console.print(f"[red]エラー: マイクを開けません: {e}[/red]")
+        console.print("\n[yellow]ヒント:[/yellow]")
+        console.print("  1. システム環境設定 > プライバシーとセキュリティ > マイク")
+        console.print("  2. ターミナルアプリにマイクアクセスを許可")
+        return
+
+    start_time = time.time()
+    max_level = 0
+
+    with audio_capture:
+        while time.time() - start_time < duration:
+            audio = audio_capture.get_audio(timeout=0.2)
+            if audio is not None and len(audio) > 0:
+                # RMSレベルを計算
+                rms = np.sqrt(np.mean(audio ** 2))
+                level = min(int(rms * 500), 50)  # 0-50のバー
+                max_level = max(max_level, level)
+
+                # レベルメーター表示
+                bar = "█" * level + "░" * (50 - level)
+                console.print(f"\r[green]{bar}[/green] {rms:.4f}", end="")
+
+    console.print("\n")
+
+    if max_level > 5:
+        console.print(f"[green]✓ マイクは正常に動作しています[/green] (最大レベル: {max_level})")
+    elif max_level > 0:
+        console.print(f"[yellow]△ 音声レベルが低いです[/yellow] (最大レベル: {max_level})")
+        console.print("  マイクに近づいて話してみてください")
+    else:
+        console.print("[red]✗ 音声が検出されませんでした[/red]")
+        console.print("\n[yellow]確認事項:[/yellow]")
+        console.print("  1. マイクがミュートになっていないか確認")
+        console.print("  2. システム環境設定でマイク入力を確認")
+        console.print("  3. uv run whisper-realtime devices で正しいデバイスを確認")
+
+
+@cli.command()
 @click.option("--path", type=click.Path(exists=True), help="モデルディレクトリ")
 def models(path: Optional[str]):
     """利用可能なモデル一覧を表示"""
@@ -247,13 +303,18 @@ def models(path: Optional[str]):
 @click.option(
     "--length",
     type=int,
-    default=5000,
-    help="処理窓の長さ (ms)",
+    default=3000,
+    help="処理窓の長さ (ms) - 短いほど反応が早い",
 )
 @click.option(
     "--vad/--no-vad",
     default=True,
     help="音声区間検出を使用",
+)
+@click.option(
+    "--debug/--no-debug",
+    default=False,
+    help="デバッグモード（処理状況を表示）",
 )
 def start(
     source: str,
@@ -268,6 +329,7 @@ def start(
     step: int,
     length: int,
     vad: bool,
+    debug: bool,
 ):
     """リアルタイム文字起こしを開始"""
 
@@ -365,7 +427,13 @@ def start(
         console.print(f"[red]音声キャプチャエラー: {e}[/red]")
         sys.exit(1)
 
-    console.print("\n[green]録音開始... (Ctrl+C で終了)[/green]\n")
+    console.print("\n[green]録音開始... (Ctrl+C で終了)[/green]")
+    if debug:
+        console.print("[dim]デバッグモード: 処理状況を表示します[/dim]")
+    console.print()
+
+    audio_chunks_received = 0
+    last_debug_time = time.time()
 
     try:
         with audio_capture:
@@ -375,9 +443,24 @@ def start(
                     audio = audio_capture.get_audio(timeout=0.1)
 
                     if audio is not None and len(audio) > 0:
+                        audio_chunks_received += 1
+
+                        # デバッグ: 音声レベル表示
+                        if debug and time.time() - last_debug_time > 1.0:
+                            rms = np.sqrt(np.mean(audio ** 2))
+                            buffer_dur = engine.get_buffer_duration()
+                            console.print(
+                                f"[dim]音声レベル: {rms:.4f} | "
+                                f"バッファ: {buffer_dur:.1f}s / {length/1000:.1f}s | "
+                                f"チャンク: {audio_chunks_received}[/dim]"
+                            )
+                            last_debug_time = time.time()
+
                         # VADフィルタリング
-                        if vad_filter:
+                        if vad_filter and vad_filter.enabled:
                             if not vad_filter.is_speech(audio):
+                                if debug:
+                                    pass  # 無音スキップ
                                 continue
 
                         # 話者分離
@@ -388,7 +471,10 @@ def start(
                         engine.add_audio(audio)
 
                         # 十分なデータが溜まったら処理
-                        if engine.get_buffer_duration() >= length / 1000:
+                        buffer_duration = engine.get_buffer_duration()
+                        if buffer_duration >= length / 1000:
+                            if debug:
+                                console.print(f"[dim]→ 文字起こし実行中... ({buffer_duration:.1f}s)[/dim]")
                             engine.process_realtime()
 
                     # 表示更新
