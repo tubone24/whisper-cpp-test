@@ -105,18 +105,27 @@ class AudioCapture:
 
     def _try_screencapturekit(self) -> bool:
         """ScreenCaptureKitでのシステム音声キャプチャを試みる"""
-        if sys.platform != "darwin" or not self.config.use_screencapturekit:
+        if sys.platform != "darwin":
+            print("[ScreenCaptureKit] macOS以外では利用不可")
+            return False
+
+        if not self.config.use_screencapturekit:
+            print("[ScreenCaptureKit] 設定で無効化されています")
             return False
 
         try:
             from .system_audio_capture import (
                 ScreenCaptureKitAudioCapture,
                 is_screencapturekit_available,
+                get_screencapturekit_error,
             )
 
             if not is_screencapturekit_available():
+                error_msg = get_screencapturekit_error()
+                print(f"[ScreenCaptureKit] 利用不可: {error_msg}")
                 return False
 
+            print("[ScreenCaptureKit] 初期化中...")
             self._sck_capture = ScreenCaptureKitAudioCapture(
                 sample_rate=self.config.sample_rate,
                 chunk_duration=self.config.chunk_duration,
@@ -136,8 +145,16 @@ class AudioCapture:
 
             return True
 
+        except ImportError as e:
+            print(f"[ScreenCaptureKit] インポートエラー: {e}")
+            print("  インストール: uv pip install 'whisper-realtime[macos]'")
+            self._sck_capture = None
+            self._use_sck = False
+            return False
         except Exception as e:
             print(f"[ScreenCaptureKit] 初期化エラー: {e}")
+            import traceback
+            traceback.print_exc()
             self._sck_capture = None
             self._use_sck = False
             return False
