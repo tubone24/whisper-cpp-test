@@ -178,7 +178,7 @@ class WhisperEngine:
             wavfile.write(temp_path, 16000, audio_int16)
 
         try:
-            # whisper.cpp main を呼び出し
+            # whisper.cpp cli を呼び出し
             cmd = [
                 str(self._main_binary),
                 "-m", str(self._get_model_path()),
@@ -186,12 +186,16 @@ class WhisperEngine:
                 "-l", self.config.language if self.config.language != "auto" else "auto",
                 "-t", str(self.config.threads),
                 "-p", str(self.config.processors),
-                "--no-timestamps",
-                "-nt",  # no prints
+                "-nt",  # no timestamps
+                "-np",  # no prints (progress等を抑制)
             ]
 
             if self.config.translate:
                 cmd.append("--translate")
+
+            # デバッグ: 実行前にコマンドを表示
+            if os.environ.get("WHISPER_DEBUG"):
+                print(f"[DEBUG] Running: {' '.join(cmd)}")
 
             result = subprocess.run(
                 cmd,
@@ -199,6 +203,13 @@ class WhisperEngine:
                 text=True,
                 timeout=30,
             )
+
+            # デバッグ: コマンド結果を表示
+            if os.environ.get("WHISPER_DEBUG"):
+                print(f"[DEBUG] Command: {' '.join(cmd)}")
+                print(f"[DEBUG] Return code: {result.returncode}")
+                print(f"[DEBUG] Stdout: {result.stdout[:200] if result.stdout else '(empty)'}")
+                print(f"[DEBUG] Stderr: {result.stderr[:200] if result.stderr else '(empty)'}")
 
             if result.returncode == 0:
                 text = result.stdout.strip()
@@ -211,8 +222,12 @@ class WhisperEngine:
                         end_time=time.time(),
                         is_final=True,
                     )
+            else:
+                # エラー時はstderrを確認
+                if result.stderr:
+                    print(f"whisper.cpp error: {result.stderr[:200]}")
         except subprocess.TimeoutExpired:
-            pass
+            print("Transcription timeout (30s)")
         except Exception as e:
             print(f"Transcription error: {e}")
         finally:

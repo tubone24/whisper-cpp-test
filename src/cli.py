@@ -332,6 +332,11 @@ def start(
     debug: bool,
 ):
     """リアルタイム文字起こしを開始"""
+    import os
+
+    # デバッグモードの場合、環境変数を設定
+    if debug:
+        os.environ["WHISPER_DEBUG"] = "1"
 
     # モデル設定
     if profile:
