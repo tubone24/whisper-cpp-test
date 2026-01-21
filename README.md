@@ -229,9 +229,7 @@ uv run whisper-realtime voice -m base -l ja --gui
 
 #### GUI Mode
 
-![Whisper Voice Input GUI](./docs/images/voice_gui.png)
-
-<!-- TODO: ユーザーがGUIのスクリーンショットを追加してください -->
+![Whisper Voice Input GUI](./docs/images/voice_gui.gif)
 
 When `--gui` is specified, a floating window appears showing:
 - Recording status (idle/recording)
@@ -278,10 +276,10 @@ The dictionary is stored at `~/.config/whisper-realtime/dictionary.json`:
   ],
   "context_rules": [
     {
-      "pattern": "家具",
-      "replacement": "KAG",
+      "pattern": "寝具",
+      "replacement": "SING",
       "context_keywords": ["会社", "開発", "プロジェクト"],
-      "negative_keywords": ["インテリア", "家具屋"],
+      "negative_keywords": ["インテリア"],
       "window_size": 100
     }
   ]
