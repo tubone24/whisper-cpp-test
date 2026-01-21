@@ -362,30 +362,35 @@ class VoiceInputManager:
         """pynputのキーオブジェクトを取得"""
         from pynput.keyboard import Key
 
-        key_mapping = {
-            HotkeyType.CTRL_RIGHT: Key.ctrl_r,
-            HotkeyType.CTRL_LEFT: Key.ctrl_l,
-            HotkeyType.ALT_RIGHT: Key.alt_r,
-            HotkeyType.ALT_LEFT: Key.alt_l,
-            HotkeyType.SHIFT_RIGHT: Key.shift_r,
-            HotkeyType.SHIFT_LEFT: Key.shift_l,
-            HotkeyType.F1: Key.f1,
-            HotkeyType.F2: Key.f2,
-            HotkeyType.F3: Key.f3,
-            HotkeyType.F4: Key.f4,
-            HotkeyType.F5: Key.f5,
-            HotkeyType.F6: Key.f6,
-            HotkeyType.F7: Key.f7,
-            HotkeyType.F8: Key.f8,
-            HotkeyType.F9: Key.f9,
-            HotkeyType.F10: Key.f10,
-            HotkeyType.F11: Key.f11,
-            HotkeyType.F12: Key.f12,
-            HotkeyType.CAPS_LOCK: Key.caps_lock,
-            HotkeyType.SCROLL_LOCK: Key.scroll_lock,
-            HotkeyType.PAUSE: Key.pause,
+        # HotkeyType から pynput Key属性名へのマッピング
+        hotkey_to_attr = {
+            HotkeyType.CTRL_RIGHT: "ctrl_r",
+            HotkeyType.CTRL_LEFT: "ctrl_l",
+            HotkeyType.ALT_RIGHT: "alt_r",
+            HotkeyType.ALT_LEFT: "alt_l",
+            HotkeyType.SHIFT_RIGHT: "shift_r",
+            HotkeyType.SHIFT_LEFT: "shift_l",
+            HotkeyType.F1: "f1",
+            HotkeyType.F2: "f2",
+            HotkeyType.F3: "f3",
+            HotkeyType.F4: "f4",
+            HotkeyType.F5: "f5",
+            HotkeyType.F6: "f6",
+            HotkeyType.F7: "f7",
+            HotkeyType.F8: "f8",
+            HotkeyType.F9: "f9",
+            HotkeyType.F10: "f10",
+            HotkeyType.F11: "f11",
+            HotkeyType.F12: "f12",
+            HotkeyType.CAPS_LOCK: "caps_lock",
+            HotkeyType.SCROLL_LOCK: "scroll_lock",
+            HotkeyType.PAUSE: "pause",
         }
-        return key_mapping.get(self.config.hotkey)
+
+        attr_name = hotkey_to_attr.get(self.config.hotkey)
+        if attr_name:
+            return getattr(Key, attr_name, None)
+        return None
 
     def _on_key_press(self, key):
         """キー押下イベント"""
