@@ -784,8 +784,7 @@ def voice(
 
         try:
             gui_manager = GUIVoiceInputManager(config)
-            gui_manager.start()
-            gui_manager.run_forever()
+            gui_manager.run()  # メインスレッドでGUI実行
         except KeyboardInterrupt:
             pass
         finally:

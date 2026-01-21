@@ -10,7 +10,7 @@ from typing import Callable, Optional
 
 
 class VoiceInputGUI:
-    """音声入力用のフローティングGUIウィンドウ"""
+    """音声入力用のフローティングGUIウィンドウ（メインスレッドで実行）"""
 
     def __init__(
         self,
@@ -24,18 +24,9 @@ class VoiceInputGUI:
         self._status_label: Optional[tk.Label] = None
         self._is_recording = False
         self._current_text = ""
-        self._gui_thread: Optional[threading.Thread] = None
-        self._ready_event = threading.Event()
 
-    def start(self):
-        """GUIを別スレッドで開始"""
-        self._gui_thread = threading.Thread(target=self._run_gui, daemon=True)
-        self._gui_thread.start()
-        # GUIの準備完了を待つ
-        self._ready_event.wait(timeout=5.0)
-
-    def _run_gui(self):
-        """GUIメインループ"""
+    def setup(self):
+        """GUIをセットアップ（メインスレッドで呼び出す）"""
         self._root = tk.Tk()
         self._root.title("Whisper Voice Input")
 
@@ -101,12 +92,6 @@ class VoiceInputGUI:
         # ウィンドウクローズイベント
         self._root.protocol("WM_DELETE_WINDOW", self._on_window_close)
 
-        # 準備完了を通知
-        self._ready_event.set()
-
-        # メインループ
-        self._root.mainloop()
-
     def _on_window_close(self):
         """ウィンドウが閉じられた時"""
         if self.on_close:
@@ -114,18 +99,25 @@ class VoiceInputGUI:
         if self._root:
             self._root.quit()
 
+    def run(self):
+        """GUIメインループを開始（メインスレッドで呼び出す）"""
+        if self._root:
+            self._root.mainloop()
+
     def set_recording(self, is_recording: bool):
-        """録音状態を設定"""
+        """録音状態を設定（スレッドセーフ）"""
         self._is_recording = is_recording
-        self._update_status()
+        if self._root:
+            self._root.after(0, self._update_status)
 
     def set_text(self, text: str):
-        """表示テキストを設定"""
+        """表示テキストを設定（スレッドセーフ）"""
         self._current_text = text
-        self._update_text()
+        if self._root:
+            self._root.after(0, self._update_text)
 
     def set_final_text(self, text: str):
-        """最終テキストを設定（クリップボードにコピー済み）"""
+        """最終テキストを設定（クリップボードにコピー済み）（スレッドセーフ）"""
         self._current_text = text
         self._is_recording = False
         if self._root:
@@ -133,26 +125,22 @@ class VoiceInputGUI:
 
     def _update_status(self):
         """ステータス表示を更新"""
-        if self._root and self._status_label:
-            def update():
-                if self._is_recording:
-                    self._status_label.config(
-                        text="🔴 録音中...",
-                        fg="#ff6b6b",
-                    )
-                else:
-                    self._status_label.config(
-                        text=f"🎤 {self.hotkey_name} を押して録音",
-                        fg="#888888",
-                    )
-            self._root.after(0, update)
+        if self._status_label:
+            if self._is_recording:
+                self._status_label.config(
+                    text="🔴 録音中...",
+                    fg="#ff6b6b",
+                )
+            else:
+                self._status_label.config(
+                    text=f"🎤 {self.hotkey_name} を押して録音",
+                    fg="#888888",
+                )
 
     def _update_text(self):
         """テキスト表示を更新"""
-        if self._root and self._label:
-            def update():
-                self._label.config(text=self._current_text)
-            self._root.after(0, update)
+        if self._label:
+            self._label.config(text=self._current_text)
 
     def _show_final(self):
         """最終結果を表示"""
@@ -179,7 +167,7 @@ class VoiceInputGUI:
         self._current_text = ""
 
     def stop(self):
-        """GUIを停止"""
+        """GUIを停止（スレッドセーフ）"""
         if self._root:
             self._root.after(0, self._root.quit)
 
@@ -188,11 +176,13 @@ class GUIVoiceInputManager:
     """GUI付きPush-to-Talk音声入力マネージャー"""
 
     def __init__(self, config):
-        from .voice_input import VoiceInputManager, HotkeyType
+        from .voice_input import HotkeyType
 
         self.config = config
-        self._voice_manager: Optional[VoiceInputManager] = None
+        self._voice_manager = None
         self._gui: Optional[VoiceInputGUI] = None
+        self._voice_thread: Optional[threading.Thread] = None
+        self._stopping = False
 
         # ホットキー名を取得
         hotkey_names = {
@@ -212,22 +202,14 @@ class GUIVoiceInputManager:
         }
         self._hotkey_name = hotkey_names.get(config.hotkey, "Key")
 
-    def start(self):
-        """マネージャーを開始"""
+    def _start_voice_manager(self):
+        """音声入力マネージャーを別スレッドで開始"""
         from .voice_input import VoiceInputManager
 
-        # GUI開始
-        self._gui = VoiceInputGUI(
-            on_close=self._on_gui_close,
-            hotkey_name=self._hotkey_name,
-        )
-        self._gui.start()
-
-        # 音声入力マネージャー開始
         self._voice_manager = VoiceInputManager(self.config)
         self._voice_manager.set_output_callback(self._on_output)
 
-        # カスタムコールバックを設定するために内部にアクセス
+        # カスタムコールバックを設定
         original_start_session = self._voice_manager._start_session
         original_stop_session = self._voice_manager._stop_session
 
@@ -248,6 +230,13 @@ class GUIVoiceInputManager:
 
         self._voice_manager.start()
 
+        # 終了を待つ
+        while not self._stopping:
+            import time
+            time.sleep(0.1)
+
+        self._voice_manager.stop()
+
     def _on_partial(self, text: str):
         """部分結果コールバック"""
         if self._gui:
@@ -260,22 +249,27 @@ class GUIVoiceInputManager:
 
     def _on_gui_close(self):
         """GUIが閉じられた時"""
-        self.stop()
+        self._stopping = True
 
-    def stop(self):
-        """マネージャーを停止"""
-        if self._voice_manager:
-            self._voice_manager.stop()
-        if self._gui:
-            self._gui.stop()
+    def run(self):
+        """実行（メインスレッドで呼び出す）"""
+        # GUIをセットアップ（メインスレッド）
+        self._gui = VoiceInputGUI(
+            on_close=self._on_gui_close,
+            hotkey_name=self._hotkey_name,
+        )
+        self._gui.setup()
 
-    def run_forever(self):
-        """永続実行（GUIが閉じられるまで）"""
-        import time
+        # 音声入力マネージャーを別スレッドで開始
+        self._voice_thread = threading.Thread(target=self._start_voice_manager, daemon=True)
+        self._voice_thread.start()
+
+        # GUIメインループ（メインスレッド）
         try:
-            while self._gui and self._gui._root:
-                time.sleep(0.1)
+            self._gui.run()
         except KeyboardInterrupt:
             pass
         finally:
-            self.stop()
+            self._stopping = True
+            if self._voice_thread:
+                self._voice_thread.join(timeout=2.0)
