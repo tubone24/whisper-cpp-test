@@ -241,24 +241,18 @@ class GUIVoiceInputManager:
 
     def run(self):
         """実行（メインスレッドで呼び出す）"""
-        import sys
-        print("GUI: セットアップ開始...", file=sys.stderr)
-
         # GUIをセットアップ（メインスレッド）
         self._gui = VoiceInputGUI(
             on_close=self._on_gui_close,
             hotkey_name=self._hotkey_name,
         )
         self._gui.setup()
-        print("GUI: セットアップ完了", file=sys.stderr)
 
         # 音声入力マネージャーを別スレッドで開始
         self._voice_thread = threading.Thread(target=self._start_voice_manager, daemon=True)
         self._voice_thread.start()
-        print("GUI: 音声スレッド開始", file=sys.stderr)
 
         # GUIメインループ（メインスレッド）
-        print("GUI: メインループ開始", file=sys.stderr)
         try:
             self._gui.run()
         except KeyboardInterrupt:
