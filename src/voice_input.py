@@ -207,11 +207,15 @@ class KeyboardTyper:
                     pass
 
             elif sys.platform == "darwin":
-                # AppleScript を使用
-                escaped_text = text.replace('"', '\\"')
-                script = f'''
+                # macOS: クリップボードにコピーしてCmd+Vでペースト
+                # より信頼性が高い方法
+                ClipboardManager.copy(text)
+                time.sleep(0.05)  # クリップボード反映待ち
+
+                # Cmd+V を送信
+                script = '''
                 tell application "System Events"
-                    keystroke "{escaped_text}"
+                    keystroke "v" using command down
                 end tell
                 '''
                 result = subprocess.run(
@@ -245,6 +249,8 @@ class VoiceInputSession:
         self._capture: Optional[AudioCapture] = None
         self._record_thread: Optional[threading.Thread] = None
         self._dictionary: Optional[Dictionary] = None
+        self._process_thread: Optional[threading.Thread] = None
+        self._last_processed_samples = 0
 
         # 辞書読み込み
         if config.use_dictionary:
@@ -258,16 +264,16 @@ class VoiceInputSession:
         self._is_recording = True
         self._audio_buffer = []
         self._partial_text = ""
+        self._last_processed_samples = 0
 
         # Whisperエンジン初期化
         whisper_config = WhisperConfig(
             model=self.config.model,
             language=self.config.language,
             step_ms=500,
-            length_ms=3000,
+            length_ms=10000,  # より長いコンテキスト
         )
         self._engine = WhisperEngine(whisper_config)
-        self._engine.set_callback(self._on_transcription)
 
         # 音声キャプチャ初期化
         audio_config = AudioConfig(
@@ -284,8 +290,12 @@ class VoiceInputSession:
         self._record_thread = threading.Thread(target=self._record_loop, daemon=True)
         self._record_thread.start()
 
+        # リアルタイム処理スレッド開始
+        self._process_thread = threading.Thread(target=self._process_loop, daemon=True)
+        self._process_thread.start()
+
     def _record_loop(self):
-        """録音ループ"""
+        """録音ループ - 音声をバッファに蓄積"""
         vad = VADFilter() if self.config.use_vad else None
 
         try:
@@ -293,28 +303,42 @@ class VoiceInputSession:
                 while self._is_recording:
                     audio = self._capture.get_audio(timeout=0.1)
                     if audio is not None and len(audio) > 0:
-                        # VADフィルタリング
-                        if vad and vad.enabled and not vad.is_speech(audio):
-                            continue
-
-                        self._audio_buffer.append(audio)
-                        self._engine.add_audio(audio)
-
-                        # リアルタイム処理
-                        if self._engine.get_buffer_duration() >= 3.0:
-                            self._engine.process_realtime()
+                        # VADフィルタリング（完全にスキップせず、音声ありの部分のみ記録）
+                        if vad and vad.enabled:
+                            if vad.is_speech(audio):
+                                self._audio_buffer.append(audio)
+                        else:
+                            self._audio_buffer.append(audio)
         except Exception as e:
             print(f"Recording error: {e}")
 
-    def _on_transcription(self, result: TranscriptionResult):
-        """文字起こし結果コールバック"""
-        text = result.text
-        if self._dictionary:
-            text = self._dictionary.apply(text)
+    def _process_loop(self):
+        """リアルタイム処理ループ - 定期的に部分結果を生成"""
+        while self._is_recording:
+            time.sleep(0.5)  # 500ms ごとに処理
 
-        self._partial_text = text
-        if self.on_partial:
-            self.on_partial(text)
+            if not self._audio_buffer:
+                continue
+
+            # 現在のバッファ全体を結合
+            current_audio = np.concatenate(self._audio_buffer)
+            current_samples = len(current_audio)
+
+            # 新しい音声がある場合のみ処理
+            if current_samples > self._last_processed_samples + 8000:  # 0.5秒以上の新規音声
+                try:
+                    # バッファ全体を文字起こし（1センテンスとして）
+                    result = self._engine.transcribe_audio(current_audio)
+                    if result and result.text.strip():
+                        text = result.text.strip()
+                        if self._dictionary:
+                            text = self._dictionary.apply(text)
+                        self._partial_text = text
+                        if self.on_partial:
+                            self.on_partial(text)
+                    self._last_processed_samples = current_samples
+                except Exception as e:
+                    print(f"Processing error: {e}")
 
     def stop(self) -> str:
         """録音停止して最終テキストを返す"""
@@ -326,13 +350,25 @@ class VoiceInputSession:
         # スレッド終了待ち
         if self._record_thread:
             self._record_thread.join(timeout=2.0)
+        if self._process_thread:
+            self._process_thread.join(timeout=1.0)
 
-        # 最終処理
-        final_text = self._partial_text
-        if self._engine:
-            final_result = self._engine.finalize()
-            if final_result:
-                final_text = final_result.text
+        # 最終処理：バッファ全体を一括で文字起こし
+        final_text = ""
+        if self._audio_buffer:
+            full_audio = np.concatenate(self._audio_buffer)
+            if len(full_audio) > 1600:  # 0.1秒以上の音声がある場合
+                try:
+                    result = self._engine.transcribe_audio(full_audio)
+                    if result and result.text.strip():
+                        final_text = result.text.strip()
+                except Exception as e:
+                    print(f"Final transcription error: {e}")
+                    final_text = self._partial_text
+
+        # 部分結果がある場合はそれを使用
+        if not final_text:
+            final_text = self._partial_text
 
         # 辞書適用
         if self._dictionary and final_text:
