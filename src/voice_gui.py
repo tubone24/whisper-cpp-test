@@ -119,6 +119,10 @@ class VoiceInputGUI:
                     text="🔴 録音中...",
                     fg="#ff6b6b",
                 )
+                # 録音開始時にウィンドウを前面に持ってくる
+                if self._root:
+                    self._root.lift()
+                    self._root.attributes("-topmost", True)
             else:
                 self._status_label.config(
                     text=f"🎤 {self.hotkey_name} を押して録音",
