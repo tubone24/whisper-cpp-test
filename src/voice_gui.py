@@ -30,25 +30,39 @@ class VoiceInputGUI:
         self._root = tk.Tk()
         self._root.title("Whisper Voice Input")
 
-        # ウィンドウ設定
-        self._root.attributes("-topmost", True)  # 常に最前面
-        self._root.overrideredirect(False)  # タイトルバーを表示
-        self._root.resizable(True, True)
-
-        # macOS用の設定
-        try:
-            self._root.attributes("-alpha", 0.95)  # 少し透明
-        except tk.TclError:
-            pass
-
-        # ウィンドウサイズと位置
+        # ウィンドウサイズと位置（先に設定）
         window_width = 400
         window_height = 120
         screen_width = self._root.winfo_screenwidth()
         screen_height = self._root.winfo_screenheight()
         x = (screen_width - window_width) // 2
-        y = screen_height - window_height - 100  # 画面下部に配置
+        y = screen_height - window_height - 200  # 画面下部に配置
         self._root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+
+        # ウィンドウ設定
+        self._root.resizable(True, True)
+
+        # macOS用の設定 - ウィンドウを確実に表示
+        import sys
+        if sys.platform == "darwin":
+            # macOSでウィンドウを前面に持ってくる
+            self._root.lift()
+            self._root.attributes("-topmost", True)
+            self._root.after(100, lambda: self._root.attributes("-topmost", True))
+            # フォーカスを取得
+            self._root.focus_force()
+        else:
+            self._root.attributes("-topmost", True)
+
+        # 透明度設定
+        try:
+            self._root.attributes("-alpha", 0.95)
+        except tk.TclError:
+            pass
+
+        # ウィンドウを表示状態にする
+        self._root.deiconify()
+        self._root.update()
 
         # 背景色
         self._root.configure(bg="#1e1e1e")
@@ -102,6 +116,11 @@ class VoiceInputGUI:
     def run(self):
         """GUIメインループを開始（メインスレッドで呼び出す）"""
         if self._root:
+            # ウィンドウを確実に表示
+            self._root.deiconify()
+            self._root.lift()
+            self._root.focus_force()
+            self._root.update()
             self._root.mainloop()
 
     def set_recording(self, is_recording: bool):
