@@ -17,6 +17,9 @@ A real-time speech transcription CLI tool using whisper.cpp, optimized for Apple
 - **Stacked conversation display** - history at top, live transcription at bottom
 - **Model selection** for speed vs accuracy trade-offs
 - **Metal GPU acceleration** for Apple Silicon
+- **Push-to-Talk voice input** - Hold a key to record, release to transcribe and copy to clipboard
+- **Dictionary feature** - Context-aware word replacement for homophones
+- **GUI mode** - Floating window for visual feedback during voice input
 
 ## Architecture
 
@@ -198,6 +201,93 @@ uv run whisper-realtime start --step 300 --length 3000
 uv run whisper-realtime test-mic
 ```
 
+### Push-to-Talk Voice Input
+
+Push-to-Talk mode allows you to quickly transcribe voice input by holding a hotkey. The transcription result is automatically copied to your clipboard.
+
+```bash
+# Start Push-to-Talk voice input (default hotkey: Right Ctrl)
+uv run whisper-realtime voice
+
+# Use a different hotkey
+uv run whisper-realtime voice --hotkey f5
+uv run whisper-realtime voice --hotkey caps_lock
+
+# With GUI mode (floating window)
+uv run whisper-realtime voice --gui
+
+# Specify model and language
+uv run whisper-realtime voice -m base -l ja --gui
+```
+
+**Available hotkeys:**
+- `ctrl_r`, `ctrl_l` - Right/Left Ctrl
+- `alt_r`, `alt_l` - Right/Left Alt
+- `shift_r`, `shift_l` - Right/Left Shift
+- `f1` - `f12` - Function keys
+- `caps_lock`, `scroll_lock`, `pause`
+
+#### GUI Mode
+
+![Whisper Voice Input GUI](./docs/images/voice_gui.gif)
+
+When `--gui` is specified, a floating window appears showing:
+- Recording status (idle/recording)
+- Real-time transcription preview
+- Confirmation when text is copied to clipboard
+
+### Dictionary Feature
+
+The dictionary feature allows automatic replacement of words based on context. This is useful for:
+- Replacing homophones (同音異義語) with the correct word
+- Converting spoken terms to proper names (e.g., "ウィスパー" → "Whisper")
+- Domain-specific term correction
+
+```bash
+# Show current dictionary
+uv run whisper-realtime dictionary show
+
+# Initialize with example dictionary
+uv run whisper-realtime dictionary init
+
+# Add a simple replacement rule
+uv run whisper-realtime dictionary add "クロード" "Claude"
+
+# Test dictionary on text
+uv run whisper-realtime dictionary test "クロードでウィスパーを使う"
+```
+
+#### Dictionary Configuration
+
+The dictionary is stored at `~/.config/whisper-realtime/dictionary.json`:
+
+```json
+{
+  "simple": {
+    "ウィスパー": "Whisper",
+    "クロード": "Claude"
+  },
+  "replacements": [
+    {
+      "pattern": "エーアイ",
+      "replacement": "AI",
+      "is_regex": false
+    }
+  ],
+  "context_rules": [
+    {
+      "pattern": "寝具",
+      "replacement": "SING",
+      "context_keywords": ["会社", "開発", "プロジェクト"],
+      "negative_keywords": ["インテリア"],
+      "window_size": 100
+    }
+  ]
+}
+```
+
+**Context rules** check surrounding text (within `window_size` characters) for keywords before replacing. This helps distinguish homophones based on context.
+
 ## Models
 
 | Model | Size | Use Case |
@@ -212,6 +302,8 @@ uv run whisper-realtime test-mic
 For real-time applications, `tiny` or `base` is recommended.
 
 ## CLI Options
+
+### start command
 
 | Option | Description |
 |--------|-------------|
@@ -228,6 +320,19 @@ For real-time applications, `tiny` or `base` is recommended.
 | `--length` | Processing window length (ms) |
 | `--vad/--no-vad` | Voice activity detection |
 | `--debug` | Show debug information |
+
+### voice command
+
+| Option | Description |
+|--------|-------------|
+| `-m, --model` | Whisper model name (default: base) |
+| `-l, --language` | Language code (default: ja) |
+| `-d, --device` | Microphone device ID |
+| `--hotkey` | Hotkey for Push-to-Talk (default: ctrl_r) |
+| `--gui` | Show GUI window |
+| `--vad-threshold` | VAD sensitivity 0-3 (default: 2) |
+| `--no-vad` | Disable VAD filter |
+| `--no-dictionary` | Disable dictionary replacement |
 
 ## System Audio Capture
 
@@ -322,6 +427,7 @@ Re-run model download:
 - numpy - Audio processing
 - rich - CLI display
 - click - CLI framework
+- pynput - Global hotkey detection for Push-to-Talk
 
 ### macOS (Optional)
 - pyobjc-framework-ScreenCaptureKit - System audio capture

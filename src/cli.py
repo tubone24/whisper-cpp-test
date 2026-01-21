@@ -24,6 +24,12 @@ from rich.style import Style
 
 from .audio_capture import AudioCapture, AudioConfig, AudioSource, VADFilter
 from .diarization import DiarizationManager
+from .dictionary import (
+    Dictionary,
+    create_example_dictionary,
+    get_default_dictionary_path,
+    load_or_create_dictionary,
+)
 from .whisper_engine import (
     MODEL_PROFILES,
     StreamingWhisperEngine,
@@ -649,6 +655,355 @@ def stream(model: str, language: str, device: Optional[int]):
 
     console.print("\n[bold]結果:[/bold]")
     console.print(display.get_full_text())
+
+
+@cli.command()
+@click.option(
+    "--hotkey", "-k",
+    type=click.Choice([
+        "ctrl_r", "ctrl_l", "alt_r", "alt_l",
+        "shift_r", "shift_l",
+        "f1", "f2", "f3", "f4", "f5", "f6",
+        "f7", "f8", "f9", "f10", "f11", "f12",
+        "caps_lock", "scroll_lock", "pause",
+    ]),
+    default="ctrl_r",
+    help="録音開始/停止のホットキー",
+)
+@click.option(
+    "--model", "-m",
+    type=click.Choice([m.value for m in WhisperModel]),
+    default="base",
+    help="使用するWhisperモデル",
+)
+@click.option(
+    "--language", "-l",
+    default="ja",
+    help="言語コード",
+)
+@click.option(
+    "--device", "-d",
+    type=int,
+    help="マイクデバイスID",
+)
+@click.option(
+    "--dictionary/--no-dictionary",
+    default=True,
+    help="辞書機能を使用",
+)
+@click.option(
+    "--dictionary-path",
+    type=click.Path(),
+    help="辞書ファイルパス",
+)
+@click.option(
+    "--gui/--no-gui",
+    default=False,
+    help="GUIウィンドウを表示",
+)
+def voice(
+    hotkey: str,
+    model: str,
+    language: str,
+    device: Optional[int],
+    dictionary: bool,
+    dictionary_path: Optional[str],
+    gui: bool,
+):
+    """
+    Push-to-Talk 音声入力モード (Aqua Voice風)
+
+    指定したホットキーを押している間、音声を録音し、
+    離すと文字起こし結果をクリップボードにコピーします。
+
+    使用例:
+        whisper-realtime voice                    # 右Ctrlで録音
+        whisper-realtime voice -k f9              # F9で録音
+        whisper-realtime voice -m large-v3-turbo  # 高精度モデルを使用
+        whisper-realtime voice --gui              # GUIウィンドウを表示
+    """
+    from .voice_input import (
+        HotkeyType,
+        OutputMode,
+        VoiceInputConfig,
+        VoiceInputManager,
+        check_dependencies,
+    )
+
+    # 依存関係チェック
+    deps = check_dependencies()
+
+    if not deps.get("pynput", False):
+        console.print("[red]エラー: pynput がインストールされていません[/red]")
+        console.print("インストール: uv pip install pynput")
+        sys.exit(1)
+
+    # Linux環境でのツールチェック
+    if sys.platform == "linux":
+        has_clipboard = deps.get("xclip") or deps.get("xsel") or deps.get("wl-copy")
+
+        if not has_clipboard:
+            console.print("[yellow]警告: クリップボードツールがありません[/yellow]")
+            console.print("  インストール: sudo apt install xclip")
+
+    # ホットキー変換
+    hotkey_map = {
+        "ctrl_r": HotkeyType.CTRL_RIGHT,
+        "ctrl_l": HotkeyType.CTRL_LEFT,
+        "alt_r": HotkeyType.ALT_RIGHT,
+        "alt_l": HotkeyType.ALT_LEFT,
+        "shift_r": HotkeyType.SHIFT_RIGHT,
+        "shift_l": HotkeyType.SHIFT_LEFT,
+        "f1": HotkeyType.F1, "f2": HotkeyType.F2, "f3": HotkeyType.F3,
+        "f4": HotkeyType.F4, "f5": HotkeyType.F5, "f6": HotkeyType.F6,
+        "f7": HotkeyType.F7, "f8": HotkeyType.F8, "f9": HotkeyType.F9,
+        "f10": HotkeyType.F10, "f11": HotkeyType.F11, "f12": HotkeyType.F12,
+        "caps_lock": HotkeyType.CAPS_LOCK,
+        "scroll_lock": HotkeyType.SCROLL_LOCK,
+        "pause": HotkeyType.PAUSE,
+    }
+
+    # 設定
+    config = VoiceInputConfig(
+        hotkey=hotkey_map[hotkey],
+        output_mode=OutputMode.CLIPBOARD,
+        model=WhisperModel(model),
+        language=language,
+        device_id=device,
+        use_dictionary=dictionary,
+        dictionary_path=Path(dictionary_path) if dictionary_path else None,
+    )
+
+    hotkey_display = hotkey.replace("_", " ").title()
+
+    # GUIモード
+    if gui:
+        from .voice_gui import GUIVoiceInputManager
+
+        console.print(f"[green]GUIモードで起動中... (ホットキー: {hotkey_display})[/green]")
+
+        try:
+            gui_manager = GUIVoiceInputManager(config)
+            gui_manager.run()  # メインスレッドでGUI実行
+        except KeyboardInterrupt:
+            pass
+        finally:
+            console.print("\n[yellow]終了しました[/yellow]")
+        return
+
+    # CLIモード
+    console.print(Panel.fit(
+        f"[bold]Push-to-Talk 音声入力[/bold]\n\n"
+        f"ホットキー: [cyan]{hotkey_display}[/cyan]\n"
+        f"モデル: {model}\n"
+        f"言語: {language}\n"
+        f"辞書: {'有効' if dictionary else '無効'}\n\n"
+        f"[dim]ホットキーを押している間、音声を録音します\n"
+        f"離すと文字起こし結果をクリップボードにコピーします\n"
+        f"Ctrl+C で終了[/dim]",
+        title="whisper-realtime voice",
+        border_style="green",
+    ))
+
+    # 辞書ファイルパス表示
+    if dictionary:
+        dict_path = Path(dictionary_path) if dictionary_path else get_default_dictionary_path()
+        console.print(f"[dim]辞書ファイル: {dict_path}[/dim]\n")
+
+    try:
+        manager = VoiceInputManager(config)
+
+        def on_output(text: str):
+            console.print(f"[green]✓[/green] {text}")
+
+        manager.set_output_callback(on_output)
+
+        with manager:
+            console.print("[green]準備完了！ホットキーを押して録音を開始してください[/green]")
+            # メインループ
+            while True:
+                time.sleep(0.1)
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]終了しました[/yellow]")
+
+
+@cli.group()
+def dictionary():
+    """辞書機能の管理"""
+    pass
+
+
+@dictionary.command(name="show")
+@click.option(
+    "--path",
+    type=click.Path(),
+    help="辞書ファイルパス",
+)
+def dictionary_show(path: Optional[str]):
+    """現在の辞書を表示"""
+    dict_path = Path(path) if path else get_default_dictionary_path()
+
+    if not dict_path.exists():
+        console.print(f"[yellow]辞書ファイルが見つかりません: {dict_path}[/yellow]")
+        console.print("'whisper-realtime dictionary init' で作成できます")
+        return
+
+    dictionary = Dictionary.from_json(dict_path)
+    data = dictionary.to_dict()
+
+    console.print(f"[bold]辞書ファイル:[/bold] {dict_path}\n")
+
+    # 単純置換ルール
+    if data.get("replacements"):
+        table = Table(title="単純置換ルール")
+        table.add_column("置換元", style="cyan")
+        table.add_column("置換先", style="green")
+        table.add_column("正規表現", style="yellow")
+
+        for rule in data["replacements"]:
+            table.add_row(
+                rule["pattern"],
+                rule["replacement"],
+                "○" if rule.get("is_regex") else "",
+            )
+        console.print(table)
+        console.print()
+
+    # 文脈ルール
+    if data.get("context_rules"):
+        table = Table(title="文脈に応じた置換ルール")
+        table.add_column("置換元", style="cyan")
+        table.add_column("置換先", style="green")
+        table.add_column("文脈キーワード", style="magenta")
+        table.add_column("除外キーワード", style="red")
+
+        for rule in data["context_rules"]:
+            table.add_row(
+                rule["pattern"],
+                rule["replacement"],
+                ", ".join(rule.get("context_keywords", [])),
+                ", ".join(rule.get("negative_keywords", [])),
+            )
+        console.print(table)
+
+
+@dictionary.command(name="init")
+@click.option(
+    "--path",
+    type=click.Path(),
+    help="辞書ファイルパス",
+)
+@click.option(
+    "--force/--no-force", "-f",
+    default=False,
+    help="既存ファイルを上書き",
+)
+def dictionary_init(path: Optional[str], force: bool):
+    """サンプル辞書を作成"""
+    dict_path = Path(path) if path else get_default_dictionary_path()
+
+    if dict_path.exists() and not force:
+        console.print(f"[yellow]辞書ファイルが既に存在します: {dict_path}[/yellow]")
+        console.print("上書きするには -f オプションを使用してください")
+        return
+
+    # 親ディレクトリ作成
+    dict_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # サンプル辞書作成
+    example_data = create_example_dictionary()
+    dictionary = Dictionary.from_dict(example_data)
+    dictionary.save_json(dict_path)
+
+    console.print(f"[green]辞書ファイルを作成しました: {dict_path}[/green]")
+    console.print("\n[dim]このファイルを編集して、カスタム置換ルールを追加できます[/dim]")
+
+
+@dictionary.command(name="add")
+@click.argument("pattern")
+@click.argument("replacement")
+@click.option(
+    "--context", "-c",
+    multiple=True,
+    help="文脈キーワード（複数指定可）",
+)
+@click.option(
+    "--path",
+    type=click.Path(),
+    help="辞書ファイルパス",
+)
+def dictionary_add(pattern: str, replacement: str, context: tuple, path: Optional[str]):
+    """辞書にルールを追加
+
+    例:
+        whisper-realtime dictionary add 家具 KAG -c 会社 -c 開発
+    """
+    dict_path = Path(path) if path else get_default_dictionary_path()
+
+    # 辞書読み込み
+    if dict_path.exists():
+        dictionary = Dictionary.from_json(dict_path)
+    else:
+        dict_path.parent.mkdir(parents=True, exist_ok=True)
+        dictionary = Dictionary()
+
+    data = dictionary.to_dict()
+
+    # ルール追加
+    if context:
+        # 文脈ルール
+        data["context_rules"].append({
+            "pattern": pattern,
+            "replacement": replacement,
+            "context_keywords": list(context),
+            "negative_keywords": [],
+            "window_size": 50,
+        })
+        console.print(f"[green]文脈ルールを追加:[/green] {pattern} → {replacement}")
+        console.print(f"  文脈キーワード: {', '.join(context)}")
+    else:
+        # 単純置換ルール
+        data["replacements"].append({
+            "pattern": pattern,
+            "replacement": replacement,
+            "is_regex": False,
+        })
+        console.print(f"[green]単純置換ルールを追加:[/green] {pattern} → {replacement}")
+
+    # 保存
+    dictionary = Dictionary.from_dict(data)
+    dictionary.save_json(dict_path)
+    console.print(f"[dim]保存: {dict_path}[/dim]")
+
+
+@dictionary.command(name="test")
+@click.argument("text")
+@click.option(
+    "--path",
+    type=click.Path(),
+    help="辞書ファイルパス",
+)
+def dictionary_test(text: str, path: Optional[str]):
+    """辞書による変換をテスト
+
+    例:
+        whisper-realtime dictionary test "家具という会社について"
+    """
+    dict_path = Path(path) if path else get_default_dictionary_path()
+
+    if not dict_path.exists():
+        console.print(f"[yellow]辞書ファイルが見つかりません: {dict_path}[/yellow]")
+        return
+
+    dictionary = Dictionary.from_json(dict_path)
+    result = dictionary.apply(text)
+
+    console.print(f"[dim]入力:[/dim] {text}")
+    console.print(f"[green]出力:[/green] {result}")
+
+    if text == result:
+        console.print("[dim]（変換なし）[/dim]")
 
 
 def main():
