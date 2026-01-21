@@ -3557,6 +3557,7 @@ dependencies = [
     { name = "click" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pynput" },
     { name = "rich" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.16.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -3576,9 +3577,6 @@ macos = [
     { name = "pyobjc-framework-libdispatch", marker = "sys_platform == 'darwin'" },
     { name = "pyobjc-framework-screencapturekit", marker = "sys_platform == 'darwin'" },
 ]
-voice = [
-    { name = "pynput" },
-]
 
 [package.dev-dependencies]
 dev = [
@@ -3591,7 +3589,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "pyannote-audio", marker = "extra == 'diarization'", specifier = ">=3.0.0" },
-    { name = "pynput", marker = "extra == 'voice'", specifier = ">=1.7.6" },
+    { name = "pynput", specifier = ">=1.7.6" },
     { name = "pyobjc-framework-avfoundation", marker = "sys_platform == 'darwin' and extra == 'macos'", specifier = ">=10.0" },
     { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin' and extra == 'macos'", specifier = ">=10.0" },
     { name = "pyobjc-framework-coremedia", marker = "sys_platform == 'darwin' and extra == 'macos'", specifier = ">=10.0" },
@@ -3603,7 +3601,7 @@ requires-dist = [
     { name = "torch", marker = "extra == 'diarization'", specifier = ">=2.0.0" },
     { name = "webrtcvad", specifier = ">=2.0.10" },
 ]
-provides-extras = ["diarization", "macos", "voice"]
+provides-extras = ["diarization", "macos"]
 
 [package.metadata.requires-dev]
 dev = [
