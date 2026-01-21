@@ -61,7 +61,7 @@ class VoiceInputConfig:
     # ホットキー設定
     hotkey: HotkeyType = HotkeyType.CTRL_RIGHT  # 右Ctrl がデフォルト
     # 出力設定
-    output_mode: OutputMode = OutputMode.TYPE
+    output_mode: OutputMode = OutputMode.CLIPBOARD  # クリップボードにコピー
     # 辞書設定
     dictionary_path: Optional[Path] = None
     use_dictionary: bool = True

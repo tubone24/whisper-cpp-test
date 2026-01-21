@@ -671,12 +671,6 @@ def stream(model: str, language: str, device: Optional[int]):
     help="録音開始/停止のホットキー",
 )
 @click.option(
-    "--output-mode", "-o",
-    type=click.Choice(["clipboard", "type", "both"]),
-    default="type",
-    help="出力モード (clipboard: コピーのみ, type: 直接入力, both: 両方)",
-)
-@click.option(
     "--model", "-m",
     type=click.Choice([m.value for m in WhisperModel]),
     default="base",
@@ -704,7 +698,6 @@ def stream(model: str, language: str, device: Optional[int]):
 )
 def voice(
     hotkey: str,
-    output_mode: str,
     model: str,
     language: str,
     device: Optional[int],
@@ -715,12 +708,12 @@ def voice(
     Push-to-Talk 音声入力モード (Aqua Voice風)
 
     指定したホットキーを押している間、音声を録音し、
-    離すと文字起こし結果をアクティブなウィンドウに入力します。
+    離すと文字起こし結果をクリップボードにコピーします。
 
     使用例:
         whisper-realtime voice                    # 右Ctrlで録音
         whisper-realtime voice -k f9              # F9で録音
-        whisper-realtime voice -o clipboard       # クリップボードにコピーのみ
+        whisper-realtime voice -m large-v3-turbo  # 高精度モデルを使用
     """
     from .voice_input import (
         HotkeyType,
@@ -741,15 +734,10 @@ def voice(
     # Linux環境でのツールチェック
     if sys.platform == "linux":
         has_clipboard = deps.get("xclip") or deps.get("xsel") or deps.get("wl-copy")
-        has_typer = deps.get("xdotool") or deps.get("ydotool") or deps.get("wtype")
 
         if not has_clipboard:
             console.print("[yellow]警告: クリップボードツールがありません[/yellow]")
             console.print("  インストール: sudo apt install xclip")
-
-        if output_mode in ("type", "both") and not has_typer:
-            console.print("[yellow]警告: キーボード入力ツールがありません[/yellow]")
-            console.print("  インストール: sudo apt install xdotool")
 
     # ホットキー変換
     hotkey_map = {
@@ -768,16 +756,10 @@ def voice(
         "pause": HotkeyType.PAUSE,
     }
 
-    output_mode_map = {
-        "clipboard": OutputMode.CLIPBOARD,
-        "type": OutputMode.TYPE,
-        "both": OutputMode.BOTH,
-    }
-
     # 設定
     config = VoiceInputConfig(
         hotkey=hotkey_map[hotkey],
-        output_mode=output_mode_map[output_mode],
+        output_mode=OutputMode.CLIPBOARD,
         model=WhisperModel(model),
         language=language,
         device_id=device,
@@ -790,12 +772,11 @@ def voice(
     console.print(Panel.fit(
         f"[bold]Push-to-Talk 音声入力[/bold]\n\n"
         f"ホットキー: [cyan]{hotkey_display}[/cyan]\n"
-        f"出力モード: {output_mode}\n"
         f"モデル: {model}\n"
         f"言語: {language}\n"
         f"辞書: {'有効' if dictionary else '無効'}\n\n"
         f"[dim]ホットキーを押している間、音声を録音します\n"
-        f"離すと文字起こし結果を入力します\n"
+        f"離すと文字起こし結果をクリップボードにコピーします\n"
         f"Ctrl+C で終了[/dim]",
         title="whisper-realtime voice",
         border_style="green",
