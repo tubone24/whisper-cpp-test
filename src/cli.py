@@ -696,6 +696,11 @@ def stream(model: str, language: str, device: Optional[int]):
     type=click.Path(),
     help="辞書ファイルパス",
 )
+@click.option(
+    "--gui/--no-gui",
+    default=False,
+    help="GUIウィンドウを表示",
+)
 def voice(
     hotkey: str,
     model: str,
@@ -703,6 +708,7 @@ def voice(
     device: Optional[int],
     dictionary: bool,
     dictionary_path: Optional[str],
+    gui: bool,
 ):
     """
     Push-to-Talk 音声入力モード (Aqua Voice風)
@@ -714,6 +720,7 @@ def voice(
         whisper-realtime voice                    # 右Ctrlで録音
         whisper-realtime voice -k f9              # F9で録音
         whisper-realtime voice -m large-v3-turbo  # 高精度モデルを使用
+        whisper-realtime voice --gui              # GUIウィンドウを表示
     """
     from .voice_input import (
         HotkeyType,
@@ -767,8 +774,25 @@ def voice(
         dictionary_path=Path(dictionary_path) if dictionary_path else None,
     )
 
-    # 表示
     hotkey_display = hotkey.replace("_", " ").title()
+
+    # GUIモード
+    if gui:
+        from .voice_gui import GUIVoiceInputManager
+
+        console.print(f"[green]GUIモードで起動中... (ホットキー: {hotkey_display})[/green]")
+
+        try:
+            gui_manager = GUIVoiceInputManager(config)
+            gui_manager.start()
+            gui_manager.run_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            console.print("\n[yellow]終了しました[/yellow]")
+        return
+
+    # CLIモード
     console.print(Panel.fit(
         f"[bold]Push-to-Talk 音声入力[/bold]\n\n"
         f"ホットキー: [cyan]{hotkey_display}[/cyan]\n"
