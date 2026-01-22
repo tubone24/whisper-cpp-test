@@ -247,6 +247,80 @@ For a native macOS experience, you can use the **WhisperMenuBar** app. This prov
 
 ![WhisperMenuBar Demo](./docs/images/menubar_app.gif)
 
+#### Menu Bar App Architecture
+
+```mermaid
+sequenceDiagram
+    participant User as 👤 User
+    participant Swift as 🍎 WhisperMenuBar<br/>(Swift)
+    participant Python as 🐍 voice-single<br/>(Python)
+    participant Whisper as 🎤 whisper.cpp
+    participant Dict as 📖 Dictionary
+    participant Proof as ✏️ Proofreader
+
+    User->>Swift: Press F9 (hotkey)
+    Swift->>Swift: Show popover 🔴
+    Swift->>Python: Start voice-single process
+
+    loop Recording Loop
+        Python->>Python: Capture audio chunks
+        Python->>Whisper: Transcribe (partial)
+        Whisper-->>Python: Raw text
+        Python->>Dict: Apply dictionary
+        Dict-->>Python: Replaced text
+        Python->>Proof: Light proofread
+        Proof-->>Python: Corrected text
+        Python-->>Swift: PARTIAL:text
+        Swift->>Swift: Update popover
+    end
+
+    User->>Swift: Release F9
+    Swift->>Python: SIGINT (stop)
+
+    Python->>Whisper: Final transcribe
+    Whisper-->>Python: 🎤 Raw: "今日は良い天気です"
+    Python->>Dict: Apply dictionary
+    Dict-->>Python: 📖 (no change)
+    Python->>Proof: Final proofread
+    Proof-->>Python: ✏️ "今日はよい天気です"
+    Python-->>Swift: FINAL:今日はよい天気です
+
+    Swift->>Swift: Copy to clipboard
+    Swift->>Swift: Show result ✓
+    Swift-->>User: 📋 Clipboard ready
+```
+
+#### Processing Pipeline Detail
+
+```mermaid
+flowchart LR
+    subgraph Input
+        MIC[🎤 Microphone]
+    end
+
+    subgraph "whisper.cpp"
+        MODEL[large-v3-turbo]
+        STREAM[Streaming<br/>step=500ms<br/>length=3000ms<br/>beam=1]
+    end
+
+    subgraph "Post Processing"
+        DICT[📖 Dictionary<br/>・固有名詞変換<br/>・同音異義語]
+        PROOF[✏️ Python校正<br/>・冗長表現削除<br/>・表記統一<br/>・誤変換修正]
+    end
+
+    subgraph Output
+        CLIP[📋 Clipboard]
+        LOG[📝 Console Log]
+    end
+
+    MIC --> MODEL
+    MODEL --> STREAM
+    STREAM --> |Raw Text| DICT
+    DICT --> |Replaced| PROOF
+    PROOF --> |Final| CLIP
+    PROOF --> |Debug| LOG
+```
+
 #### Building the Menu Bar App
 
 ```bash

@@ -31,6 +31,9 @@ class WhisperModel(Enum):
     LARGE_V2 = "large-v2"
     LARGE_V3 = "large-v3"
     LARGE_V3_TURBO = "large-v3-turbo"
+    # 量子化モデル（軽量・高速）
+    LARGE_V3_TURBO_Q8_0 = "large-v3-turbo-q8_0"
+    LARGE_V3_TURBO_Q5_0 = "large-v3-turbo-q5_0"
 
 
 # モデルの推奨設定（リアルタイム性 vs 精度）
@@ -39,6 +42,8 @@ MODEL_PROFILES = {
     "balanced": WhisperModel.BASE,        # バランス
     "quality": WhisperModel.SMALL,        # 高精度、やや遅い
     "best": WhisperModel.LARGE_V3_TURBO,  # 最高精度、要GPU
+    "best-q8": WhisperModel.LARGE_V3_TURBO_Q8_0,  # 高精度・量子化（8bit）
+    "best-q5": WhisperModel.LARGE_V3_TURBO_Q5_0,  # 高精度・量子化（5bit、最軽量）
 }
 
 
@@ -61,10 +66,17 @@ class WhisperConfig:
     translate: bool = False  # 英語に翻訳
     threads: int = 4
     processors: int = 1
-    # リアルタイム設定
-    step_ms: int = 500  # 処理ステップ（ミリ秒）
-    length_ms: int = 5000  # 処理窓の長さ（ミリ秒）
-    keep_ms: int = 200  # コンテキスト保持（ミリ秒）
+    # リアルタイムStreaming最適化設定
+    # 参考: https://github.com/ggml-org/whisper.cpp/blob/master/examples/stream/stream.cpp
+    step_ms: int = 500  # 処理ステップ（ミリ秒）- 応答頻度を決定
+    length_ms: int = 3000  # 処理窓の長さ（ミリ秒）- 短いほど低レイテンシ
+    keep_ms: int = 200  # コンテキスト保持（ミリ秒）- 単語境界問題を軽減
+    # Streaming高速化オプション
+    beam_size: int = 1  # Greedy search (1) で高速化、精度重視なら5
+    max_tokens: int = 32  # チャンクあたりの最大トークン数
+    vad_threshold: float = 0.6  # VAD閾値（音声検出感度）
+    use_flash_attn: bool = True  # Flash Attention有効化
+    no_timestamps: bool = True  # タイムスタンプ無効化（高速化）
     # パス設定
     whisper_cpp_path: Optional[Path] = None
     models_path: Optional[Path] = None
@@ -394,16 +406,26 @@ class StreamingWhisperEngine:
         if not model_path.exists():
             raise FileNotFoundError(f"モデルが見つかりません: {model_path}")
 
+        # Streaming最適化パラメータ
+        # 参考: https://github.com/ggml-org/whisper.cpp/issues/1353
         cmd = [
             str(self._stream_binary),
             "-m", str(model_path),
             "-l", self.config.language if self.config.language != "auto" else "auto",
             "-t", str(self.config.threads),
+            # 時間窓パラメータ（レイテンシに直接影響）
             "--step", str(self.config.step_ms),
             "--length", str(self.config.length_ms),
             "--keep", str(self.config.keep_ms),
-            "-vth", "0.6",  # VAD threshold
+            # 高速化パラメータ
+            "-bs", str(self.config.beam_size),  # Greedy search for speed
+            "-mt", str(self.config.max_tokens),  # Max tokens per chunk
+            "-vth", str(self.config.vad_threshold),  # VAD threshold
         ]
+
+        # Flash Attention有効化（Apple Silicon等で効果的）
+        if self.config.use_flash_attn:
+            cmd.append("-fa")
 
         if capture_id is not None:
             cmd.extend(["-c", str(capture_id)])

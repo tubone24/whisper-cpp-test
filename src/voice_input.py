@@ -3,6 +3,7 @@ Push-to-Talk 音声入力モジュール
 キーを押している間録音し、離すと確定してペースト
 """
 
+import logging
 import os
 import subprocess
 import sys
@@ -15,8 +16,18 @@ from typing import Callable, Optional
 
 import numpy as np
 
+# デバッグログ設定（stderrに出力）
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='[%(asctime)s.%(msecs)03d] %(levelname)s %(name)s: %(message)s',
+    datefmt='%H:%M:%S',
+    stream=sys.stderr
+)
+logger = logging.getLogger('voice_input')
+
 from .audio_capture import AudioCapture, AudioConfig, AudioSource, VADFilter
 from .dictionary import Dictionary, load_or_create_dictionary
+from .proofreader import Proofreader, ProofreaderConfig
 from .whisper_engine import TranscriptionResult, WhisperConfig, WhisperEngine, WhisperModel
 
 
@@ -65,6 +76,9 @@ class VoiceInputConfig:
     # 辞書設定
     dictionary_path: Optional[Path] = None
     use_dictionary: bool = True
+    # 校正設定
+    use_proofreader: bool = True  # Python軽量校正を使用
+    use_textlint: bool = False  # textlint校正は重いため非推奨（デフォルトOFF）
     # Whisper設定
     model: WhisperModel = WhisperModel.BASE
     language: str = "ja"
@@ -249,6 +263,7 @@ class VoiceInputSession:
         self._capture: Optional[AudioCapture] = None
         self._record_thread: Optional[threading.Thread] = None
         self._dictionary: Optional[Dictionary] = None
+        self._proofreader: Optional[Proofreader] = None
         self._process_thread: Optional[threading.Thread] = None
         self._last_processed_samples = 0
 
@@ -256,24 +271,47 @@ class VoiceInputSession:
         if config.use_dictionary:
             self._dictionary = load_or_create_dictionary(config.dictionary_path)
 
+        # 校正機能初期化
+        if config.use_proofreader:
+            proofreader_config = ProofreaderConfig(
+                enable_light_proofreading=True,
+                enable_textlint=config.use_textlint,
+            )
+            self._proofreader = Proofreader(proofreader_config)
+
     def start(self):
         """録音開始"""
         if self._is_recording:
             return
+
+        logger.info("=== Recording session START ===")
+        logger.info(f"  Model: {self.config.model.value}")
+        logger.info(f"  Language: {self.config.language}")
+        logger.info(f"  Dictionary: {self.config.use_dictionary}")
+        logger.info(f"  Proofreader: {self.config.use_proofreader}")
+        logger.info(f"  Textlint: {self.config.use_textlint}")
 
         self._is_recording = True
         self._audio_buffer = []
         self._partial_text = ""
         self._last_processed_samples = 0
 
-        # Whisperエンジン初期化
+        # Whisperエンジン初期化（Streaming最適化パラメータ）
+        logger.debug("Initializing WhisperEngine...")
         whisper_config = WhisperConfig(
             model=self.config.model,
             language=self.config.language,
-            step_ms=500,
-            length_ms=10000,  # より長いコンテキスト
+            # Streaming最適化設定
+            step_ms=500,  # 500ms毎に処理
+            length_ms=3000,  # 3秒の窓（レイテンシ削減）
+            keep_ms=200,  # コンテキスト保持
+            beam_size=1,  # Greedy search（高速）
+            max_tokens=32,
+            use_flash_attn=True,
+            no_timestamps=True,
         )
         self._engine = WhisperEngine(whisper_config)
+        logger.debug("WhisperEngine initialized")
 
         # 音声キャプチャ初期化
         audio_config = AudioConfig(
@@ -296,7 +334,9 @@ class VoiceInputSession:
 
     def _record_loop(self):
         """録音ループ - 音声をバッファに蓄積"""
+        logger.debug("_record_loop started")
         vad = VADFilter() if self.config.use_vad else None
+        chunk_count = 0
 
         try:
             with self._capture:
@@ -307,13 +347,24 @@ class VoiceInputSession:
                         if vad and vad.enabled:
                             if vad.is_speech(audio):
                                 self._audio_buffer.append(audio)
+                                chunk_count += 1
                         else:
                             self._audio_buffer.append(audio)
+                            chunk_count += 1
+
+                        if chunk_count % 10 == 0:
+                            total_samples = sum(len(a) for a in self._audio_buffer)
+                            logger.debug(f"Audio: {chunk_count} chunks, {total_samples} samples ({total_samples/16000:.1f}s)")
         except Exception as e:
-            print(f"Recording error: {e}")
+            logger.error(f"Recording error: {e}")
+
+        logger.debug(f"_record_loop ended, total chunks: {chunk_count}")
 
     def _process_loop(self):
         """リアルタイム処理ループ - 定期的に部分結果を生成"""
+        logger.debug("_process_loop started")
+        process_count = 0
+
         while self._is_recording:
             time.sleep(0.5)  # 500ms ごとに処理
 
@@ -327,52 +378,105 @@ class VoiceInputSession:
             # 新しい音声がある場合のみ処理
             if current_samples > self._last_processed_samples + 8000:  # 0.5秒以上の新規音声
                 try:
+                    process_count += 1
+                    logger.debug(f"[Process #{process_count}] Input: {current_samples} samples ({current_samples/16000:.1f}s)")
+
                     # バッファ全体を文字起こし（1センテンスとして）
+                    t0 = time.time()
                     result = self._engine.transcribe_audio(current_audio)
+                    whisper_time = time.time() - t0
+                    logger.debug(f"[Process #{process_count}] Whisper: {whisper_time:.2f}s")
+
                     if result and result.text.strip():
                         text = result.text.strip()
+                        logger.info(f"[PARTIAL #{process_count}] 🎤 Whisper Raw: '{text}'")
+
+                        # 辞書適用
                         if self._dictionary:
+                            t0 = time.time()
+                            before_dict = text
                             text = self._dictionary.apply(text)
+                            if text != before_dict:
+                                logger.info(f"[PARTIAL #{process_count}] 📖 Dictionary: '{before_dict}' → '{text}'")
+
+                        # 軽量校正（部分結果用、高速）
+                        if self._proofreader:
+                            t0 = time.time()
+                            before_proof = text
+                            text = self._proofreader.proofread_partial(text)
+                            if text != before_proof:
+                                logger.info(f"[PARTIAL #{process_count}] ✏️ Proofread: '{before_proof}' → '{text}'")
+
                         self._partial_text = text
                         if self.on_partial:
                             self.on_partial(text)
                     self._last_processed_samples = current_samples
                 except Exception as e:
-                    print(f"Processing error: {e}")
+                    logger.error(f"Processing error: {e}")
+
+        logger.debug(f"_process_loop ended, total processes: {process_count}")
 
     def stop(self) -> str:
         """録音停止して最終テキストを返す"""
         if not self._is_recording:
             return ""
 
+        logger.info("=== Recording session STOP ===")
         self._is_recording = False
 
         # スレッド終了待ち
+        logger.debug("Waiting for threads to finish...")
         if self._record_thread:
             self._record_thread.join(timeout=2.0)
         if self._process_thread:
             self._process_thread.join(timeout=1.0)
+        logger.debug("Threads finished")
 
         # 最終処理：バッファ全体を一括で文字起こし
         final_text = ""
         if self._audio_buffer:
             full_audio = np.concatenate(self._audio_buffer)
+            total_duration = len(full_audio) / 16000
+            logger.info(f"[FINAL] 🎙️ Audio: {total_duration:.1f}s ({len(full_audio)} samples)")
+
             if len(full_audio) > 1600:  # 0.1秒以上の音声がある場合
                 try:
+                    t0 = time.time()
                     result = self._engine.transcribe_audio(full_audio)
+                    logger.info(f"[FINAL] ⏱️ Whisper処理時間: {time.time()-t0:.2f}s")
                     if result and result.text.strip():
                         final_text = result.text.strip()
+                        logger.info(f"[FINAL] 🎤 Whisper Raw: '{final_text}'")
                 except Exception as e:
-                    print(f"Final transcription error: {e}")
+                    logger.error(f"[FINAL] ❌ Transcription error: {e}")
                     final_text = self._partial_text
 
         # 部分結果がある場合はそれを使用
         if not final_text:
             final_text = self._partial_text
+            logger.info(f"[FINAL] ⚠️ Using partial text: '{final_text}'")
 
         # 辞書適用
         if self._dictionary and final_text:
+            t0 = time.time()
+            before_dict = final_text
             final_text = self._dictionary.apply(final_text)
+            if final_text != before_dict:
+                logger.info(f"[FINAL] 📖 Dictionary: '{before_dict}' → '{final_text}'")
+
+        # 本格校正（Python軽量校正、textlintはオプション）
+        if self._proofreader and final_text:
+            t0 = time.time()
+            before_proof = final_text
+            proofread_result = self._proofreader.proofread_final(final_text)
+            final_text = proofread_result.corrected_text
+            if final_text != before_proof:
+                logger.info(f"[FINAL] ✏️ Proofread: '{before_proof}' → '{final_text}'")
+                if proofread_result.corrections:
+                    for c in proofread_result.corrections:
+                        logger.info(f"[FINAL]    └─ {c.get('type', '?')}: {c.get('description', '')}")
+
+        logger.info(f"[FINAL] ✅ Output: '{final_text}'")
 
         if self.on_final:
             self.on_final(final_text)

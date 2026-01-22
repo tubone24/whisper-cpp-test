@@ -459,13 +459,18 @@ def start(
         "both": AudioSource.BOTH,
     }[source]
 
-    # Whisper設定
+    # Whisper設定（Streaming最適化パラメータ）
     whisper_config = WhisperConfig(
         model=whisper_model,
         language=language,
         translate=translate,
         step_ms=step,
         length_ms=length,
+        # Streaming高速化オプション
+        beam_size=1,  # Greedy search for speed
+        max_tokens=32,
+        use_flash_attn=True,
+        no_timestamps=True,
     )
 
     # 話者分離マネージャー
@@ -706,6 +711,16 @@ def stream(model: str, language: str, device: Optional[int]):
     default=False,
     help="メニューバー常駐モード (macOS専用)",
 )
+@click.option(
+    "--proofread/--no-proofread",
+    default=True,
+    help="校正機能を使用（Python軽量校正）",
+)
+@click.option(
+    "--textlint/--no-textlint",
+    default=False,
+    help="textlint校正を使用（重いため非推奨、代わりにPython軽量校正を使用）",
+)
 def voice(
     hotkey: str,
     model: str,
@@ -715,6 +730,8 @@ def voice(
     dictionary_path: Optional[str],
     gui: bool,
     menubar: bool,
+    proofread: bool,
+    textlint: bool,
 ):
     """
     Push-to-Talk 音声入力モード (Aqua Voice風)
@@ -779,6 +796,8 @@ def voice(
         device_id=device,
         use_dictionary=dictionary,
         dictionary_path=Path(dictionary_path) if dictionary_path else None,
+        use_proofreader=proofread,
+        use_textlint=textlint,
     )
 
     hotkey_display = hotkey.replace("_", " ").title()
@@ -1064,12 +1083,24 @@ def dictionary_test(text: str, path: Optional[str]):
     type=click.Path(),
     help="辞書ファイルパス",
 )
+@click.option(
+    "--proofread/--no-proofread",
+    default=True,
+    help="校正機能を使用（Python軽量校正）",
+)
+@click.option(
+    "--textlint/--no-textlint",
+    default=False,
+    help="textlint校正を使用（重いため非推奨、代わりにPython軽量校正を使用）",
+)
 def voice_single(
     model: str,
     language: str,
     device: Optional[int],
     dictionary: bool,
     dictionary_path: Optional[str],
+    proofread: bool,
+    textlint: bool,
 ):
     """
     シングルショット音声入力モード（外部アプリ連携用）
@@ -1078,11 +1109,22 @@ def voice_single(
     SwiftのMenuBarアプリなど外部から呼び出すためのコマンド。
 
     出力形式:
-        PARTIAL:<部分結果>
-        FINAL:<最終結果>
+        stdout: PARTIAL:<部分結果> / FINAL:<最終結果>
+        stderr: デバッグログ（タイムスタンプ付き）
     """
+    import logging
+
     from .voice_input import VoiceInputConfig, VoiceInputSession, ClipboardManager, HotkeyType
     from .dictionary import load_or_create_dictionary
+
+    # voice_input.pyでlogging設定済みなのでloggerを取得
+    logger = logging.getLogger('voice_single')
+    logger.info("=== voice-single started ===")
+    logger.info(f"  Model: {model}")
+    logger.info(f"  Language: {language}")
+    logger.info(f"  Dictionary: {dictionary}")
+    logger.info(f"  Proofread: {proofread}")
+    logger.info(f"  Textlint: {textlint}")
 
     whisper_model = WhisperModel(model)
 
@@ -1094,6 +1136,8 @@ def voice_single(
         device_id=device,
         use_dictionary=dictionary,
         dictionary_path=Path(dictionary_path) if dictionary_path else None,
+        use_proofreader=proofread,
+        use_textlint=textlint,
     )
 
     # 終了フラグ
@@ -1102,6 +1146,7 @@ def voice_single(
 
     def on_partial(text: str):
         """部分結果コールバック"""
+        logger.debug(f"PARTIAL output: '{text[:50]}...' ({len(text)} chars)")
         print(f"PARTIAL:{text}", flush=True)
 
     def on_final(text: str):
@@ -1110,18 +1155,21 @@ def voice_single(
 
     def signal_handler(sig, frame):
         nonlocal running
+        logger.info(f"Signal received: {sig}")
         running = False
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
     # セッション作成と録音開始
+    logger.info("Creating VoiceInputSession...")
     session = VoiceInputSession(
         config=config,
         on_partial=on_partial,
         on_final=on_final,
     )
 
+    logger.info("Starting recording...")
     session.start()
 
     # SIGINTまで待機
@@ -1129,17 +1177,22 @@ def voice_single(
         while running:
             time.sleep(0.1)
     except KeyboardInterrupt:
-        pass
+        logger.info("KeyboardInterrupt received")
 
     # 録音停止と結果取得
+    logger.info("Stopping recording...")
     final_text = session.stop()
 
     if final_text:
         # クリップボードにコピー
+        logger.info(f"Copying to clipboard: '{final_text}'")
         ClipboardManager.copy(final_text)
         print(f"FINAL:{final_text}", flush=True)
     else:
+        logger.warning("No final text")
         print("FINAL:", flush=True)
+
+    logger.info("=== voice-single ended ===")
 
 
 def main():
