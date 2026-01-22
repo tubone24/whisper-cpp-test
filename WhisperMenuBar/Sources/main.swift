@@ -339,7 +339,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // 設定
     private let hotkeyCode: CGKeyCode = 101  // F9 = 101, Right Ctrl = 62
     private let hotkeyName = "F9"
-    private let whisperModel = "large-v3-turbo"  // base, small, large-v3-turbo
+    // Streaming最適化: 量子化モデルはStreaming時の効果が限定的なため、元モデルを使用
+    private let whisperModel = "large-v3-turbo"  // base, large-v3-turbo, large-v3-turbo-q8_0, large-v3-turbo-q5_0
     private let whisperLanguage = "ja"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -438,6 +439,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty { continue }
+
+            // すべてのログをコンソールに出力（デバッグ用）
+            print("[Whisper] \(trimmed)")
 
             if trimmed.hasPrefix("PARTIAL:") {
                 let text = String(trimmed.dropFirst(8))

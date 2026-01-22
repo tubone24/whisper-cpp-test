@@ -13,7 +13,7 @@ echo ""
 
 # Clone and build whisper.cpp
 setup_whisper_cpp() {
-    echo "[1/4] Setting up whisper.cpp..."
+    echo "[1/6] Setting up whisper.cpp..."
 
     if [ -d "$WHISPER_DIR" ]; then
         echo "whisper.cpp already cloned. Updating..."
@@ -57,30 +57,32 @@ setup_whisper_cpp() {
 # Download models
 download_models() {
     echo ""
-    echo "[2/4] Downloading models..."
+    echo "[2/6] Downloading models..."
 
     mkdir -p "$MODELS_DIR"
     cd "$WHISPER_DIR"
 
     # Available models:
     # tiny.en, tiny, base.en, base, small.en, small, medium.en, medium, large-v1, large-v2, large-v3, large-v3-turbo
+    # Quantized: large-v3-turbo-q8_0, large-v3-turbo-q5_0
 
-    # Download base model by default (balanced for real-time)
+    # Download large-v3-turbo model (Streaming最適化では量子化より元モデルが推奨)
+    # Streaming処理はデコード部分がボトルネックのため、量子化による速度改善は限定的
+    if [ ! -f "$MODELS_DIR/ggml-large-v3-turbo.bin" ]; then
+        echo "Downloading ggml-large-v3-turbo model (recommended for streaming)..."
+        bash models/download-ggml-model.sh large-v3-turbo
+        cp models/ggml-large-v3-turbo.bin "$MODELS_DIR/"
+    else
+        echo "ggml-large-v3-turbo model already downloaded"
+    fi
+
+    # Also download base model (fallback, smaller)
     if [ ! -f "$MODELS_DIR/ggml-base.bin" ]; then
-        echo "Downloading ggml-base model..."
+        echo "Downloading ggml-base model (fallback)..."
         bash models/download-ggml-model.sh base
         cp models/ggml-base.bin "$MODELS_DIR/"
     else
         echo "ggml-base model already downloaded"
-    fi
-
-    # Also download tiny model (fastest, for real-time priority)
-    if [ ! -f "$MODELS_DIR/ggml-tiny.bin" ]; then
-        echo "Downloading ggml-tiny model..."
-        bash models/download-ggml-model.sh tiny
-        cp models/ggml-tiny.bin "$MODELS_DIR/"
-    else
-        echo "ggml-tiny model already downloaded"
     fi
 
     echo "Model download complete!"
@@ -89,7 +91,7 @@ download_models() {
 # Setup Python environment using uv
 setup_python() {
     echo ""
-    echo "[3/4] Setting up Python environment (uv)..."
+    echo "[3/6] Setting up Python environment (uv)..."
 
     cd "$SCRIPT_DIR"
 
@@ -107,10 +109,99 @@ setup_python() {
     echo "Python environment setup complete!"
 }
 
+# Setup textlint for proofreading (オプション、重いため非推奨)
+# Python軽量校正がデフォルトで有効なため、textlintは通常不要
+setup_textlint() {
+    echo ""
+    echo "[4/6] Skipping textlint setup (Python軽量校正を使用)..."
+    echo "  textlintを使用したい場合は --with-textlint オプションを使用してください"
+    echo "  例: ./setup.sh --with-textlint"
+}
+
+# textlintをインストールする関数（オプショナル）
+setup_textlint_optional() {
+    echo ""
+    echo "[4/6] Setting up textlint (optional, 重い処理)..."
+
+    # Check if Node.js is installed
+    if ! command -v node &> /dev/null; then
+        echo "Node.js is not installed. Installing via Homebrew..."
+        if command -v brew &> /dev/null; then
+            brew install node
+        else
+            echo "Warning: Homebrew not found. Please install Node.js manually."
+            echo "  https://nodejs.org/"
+            return
+        fi
+    fi
+
+    # Check if textlint is installed globally
+    if ! command -v textlint &> /dev/null; then
+        echo "Installing textlint and Japanese rules..."
+        npm install -g textlint textlint-rule-preset-ja-technical-writing textlint-rule-preset-japanese
+    else
+        echo "textlint already installed"
+    fi
+
+    # Create default config if not exists
+    CONFIG_DIR="$HOME/.config/whisper-realtime"
+    CONFIG_FILE="$CONFIG_DIR/.textlintrc.json"
+    mkdir -p "$CONFIG_DIR"
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "Creating default textlint config..."
+        cat > "$CONFIG_FILE" << 'EOF'
+{
+  "rules": {
+    "preset-ja-technical-writing": {
+      "sentence-length": {
+        "max": 100
+      },
+      "max-ten": {
+        "max": 3
+      },
+      "no-doubled-joshi": {
+        "strict": false
+      }
+    }
+  }
+}
+EOF
+    fi
+
+    echo "textlint setup complete!"
+}
+
+# Build WhisperMenuBar
+build_menubar_app() {
+    echo ""
+    echo "[5/6] Building WhisperMenuBar..."
+
+    MENUBAR_DIR="$SCRIPT_DIR/WhisperMenuBar"
+
+    if [ ! -d "$MENUBAR_DIR" ]; then
+        echo "WhisperMenuBar directory not found. Skipping..."
+        return
+    fi
+
+    cd "$MENUBAR_DIR"
+
+    # Build using Swift Package Manager
+    echo "Building with Swift Package Manager..."
+    swift build -c debug
+
+    if [ -f ".build/debug/WhisperMenuBar" ]; then
+        echo "WhisperMenuBar build complete!"
+        echo "  Binary: $MENUBAR_DIR/.build/debug/WhisperMenuBar"
+    else
+        echo "Warning: WhisperMenuBar build may have failed"
+    fi
+}
+
 # Show audio setup information
 show_audio_setup_info() {
     echo ""
-    echo "[4/4] Audio Configuration"
+    echo "[6/6] Audio Configuration"
     echo ""
     echo "■ Microphone Input:"
     echo "  → No additional setup required. Ready to use."
@@ -143,6 +234,8 @@ main() {
     SKIP_WHISPER=false
     SKIP_MODELS=false
     SKIP_PYTHON=false
+    SKIP_MENUBAR=false
+    WITH_TEXTLINT=false
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -158,6 +251,14 @@ main() {
                 SKIP_PYTHON=true
                 shift
                 ;;
+            --skip-menubar)
+                SKIP_MENUBAR=true
+                shift
+                ;;
+            --with-textlint)
+                WITH_TEXTLINT=true
+                shift
+                ;;
             --model)
                 EXTRA_MODEL="$2"
                 shift 2
@@ -169,8 +270,11 @@ main() {
                 echo "  --skip-whisper    Skip whisper.cpp build"
                 echo "  --skip-models     Skip model download"
                 echo "  --skip-python     Skip Python environment setup"
+                echo "  --skip-menubar    Skip WhisperMenuBar build"
+                echo "  --with-textlint   Install textlint (optional, 重い処理)"
                 echo "  --model <name>    Download additional model"
-                echo "                    (tiny, base, small, medium, large-v3, large-v3-turbo)"
+                echo "                    (tiny, base, small, medium, large-v3, large-v3-turbo,"
+                echo "                     large-v3-turbo-q8_0, large-v3-turbo-q5_0)"
                 echo "  --help            Show this help"
                 exit 0
                 ;;
@@ -202,6 +306,17 @@ main() {
         setup_python
     fi
 
+    # textlintはオプション（--with-textlintを指定した場合のみ）
+    if [ "$WITH_TEXTLINT" = true ]; then
+        setup_textlint_optional
+    else
+        setup_textlint
+    fi
+
+    if [ "$SKIP_MENUBAR" = false ]; then
+        build_menubar_app
+    fi
+
     show_audio_setup_info
 
     echo "=== Setup Complete ==="
@@ -212,7 +327,13 @@ main() {
     echo "Quick start:"
     echo "  uv run whisper-realtime start           # Start with microphone"
     echo "  uv run whisper-realtime start -s system # Start with system audio"
-    echo "  uv run whisper-realtime devices         # List audio devices"
+    echo "  uv run whisper-realtime voice --menubar # Menubar mode (Python)"
+    echo ""
+    echo "WhisperMenuBar (Native Swift app):"
+    echo "  ./WhisperMenuBar/.build/debug/WhisperMenuBar"
+    echo ""
+    echo "Models:"
+    echo "  Default: large-v3-turbo (best for streaming with optimized params)"
     echo "  uv run whisper-realtime models          # List available models"
     echo ""
 }
