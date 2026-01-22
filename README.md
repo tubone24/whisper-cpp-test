@@ -112,8 +112,8 @@ sequenceDiagram
 
 ```bash
 # Clone the repository
-git clone https://github.com/tubone24/whisper-cpp-test
-cd whisper-cpp-test
+git clone https://github.com/tubone24/whisper-realtime
+cd whisper-realtime
 
 # Run setup script
 ./setup.sh
