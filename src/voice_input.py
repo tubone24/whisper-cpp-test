@@ -27,7 +27,7 @@ logger = logging.getLogger('voice_input')
 
 from .audio_capture import AudioCapture, AudioConfig, AudioSource, VADFilter
 from .dictionary import Dictionary, load_or_create_dictionary
-from .proofreader import Proofreader, ProofreaderConfig
+from .phonetic_corrector import PhoneticCorrector, PhoneticCorrectorConfig
 from .whisper_engine import TranscriptionResult, WhisperConfig, WhisperEngine, WhisperModel
 
 
@@ -76,9 +76,8 @@ class VoiceInputConfig:
     # 辞書設定
     dictionary_path: Optional[Path] = None
     use_dictionary: bool = True
-    # 校正設定
-    use_proofreader: bool = True  # Python軽量校正を使用
-    use_textlint: bool = False  # textlint校正は重いため非推奨（デフォルトOFF）
+    # 音声認識誤り訂正設定
+    use_phonetic_correction: bool = True  # 音声認識誤り訂正を使用
     # Whisper設定
     model: WhisperModel = WhisperModel.BASE
     language: str = "ja"
@@ -263,7 +262,7 @@ class VoiceInputSession:
         self._capture: Optional[AudioCapture] = None
         self._record_thread: Optional[threading.Thread] = None
         self._dictionary: Optional[Dictionary] = None
-        self._proofreader: Optional[Proofreader] = None
+        self._phonetic_corrector: Optional[PhoneticCorrector] = None
         self._process_thread: Optional[threading.Thread] = None
         self._last_processed_samples = 0
 
@@ -271,13 +270,9 @@ class VoiceInputSession:
         if config.use_dictionary:
             self._dictionary = load_or_create_dictionary(config.dictionary_path)
 
-        # 校正機能初期化
-        if config.use_proofreader:
-            proofreader_config = ProofreaderConfig(
-                enable_light_proofreading=True,
-                enable_textlint=config.use_textlint,
-            )
-            self._proofreader = Proofreader(proofreader_config)
+        # 音声認識誤り訂正機能初期化
+        if config.use_phonetic_correction:
+            self._phonetic_corrector = PhoneticCorrector()
 
     def start(self):
         """録音開始"""
@@ -288,8 +283,7 @@ class VoiceInputSession:
         logger.info(f"  Model: {self.config.model.value}")
         logger.info(f"  Language: {self.config.language}")
         logger.info(f"  Dictionary: {self.config.use_dictionary}")
-        logger.info(f"  Proofreader: {self.config.use_proofreader}")
-        logger.info(f"  Textlint: {self.config.use_textlint}")
+        logger.info(f"  PhoneticCorrection: {self.config.use_phonetic_correction}")
 
         self._is_recording = True
         self._audio_buffer = []
@@ -393,19 +387,18 @@ class VoiceInputSession:
 
                         # 辞書適用
                         if self._dictionary:
-                            t0 = time.time()
                             before_dict = text
                             text = self._dictionary.apply(text)
                             if text != before_dict:
                                 logger.info(f"[PARTIAL #{process_count}] 📖 Dictionary: '{before_dict}' → '{text}'")
 
-                        # 軽量校正（部分結果用、高速）
-                        if self._proofreader:
-                            t0 = time.time()
-                            before_proof = text
-                            text = self._proofreader.proofread_partial(text)
-                            if text != before_proof:
-                                logger.info(f"[PARTIAL #{process_count}] ✏️ Proofread: '{before_proof}' → '{text}'")
+                        # 音声認識誤り訂正
+                        if self._phonetic_corrector:
+                            before_corr = text
+                            result = self._phonetic_corrector.correct(text)
+                            text = result.corrected_text
+                            if text != before_corr:
+                                logger.info(f"[PARTIAL #{process_count}] 🔊 Phonetic: '{before_corr}' → '{text}'")
 
                         self._partial_text = text
                         if self.on_partial:
@@ -458,22 +451,20 @@ class VoiceInputSession:
 
         # 辞書適用
         if self._dictionary and final_text:
-            t0 = time.time()
             before_dict = final_text
             final_text = self._dictionary.apply(final_text)
             if final_text != before_dict:
                 logger.info(f"[FINAL] 📖 Dictionary: '{before_dict}' → '{final_text}'")
 
-        # 本格校正（Python軽量校正、textlintはオプション）
-        if self._proofreader and final_text:
-            t0 = time.time()
-            before_proof = final_text
-            proofread_result = self._proofreader.proofread_final(final_text)
-            final_text = proofread_result.corrected_text
-            if final_text != before_proof:
-                logger.info(f"[FINAL] ✏️ Proofread: '{before_proof}' → '{final_text}'")
-                if proofread_result.corrections:
-                    for c in proofread_result.corrections:
+        # 音声認識誤り訂正
+        if self._phonetic_corrector and final_text:
+            before_corr = final_text
+            correction_result = self._phonetic_corrector.correct(final_text)
+            final_text = correction_result.corrected_text
+            if final_text != before_corr:
+                logger.info(f"[FINAL] 🔊 Phonetic: '{before_corr}' → '{final_text}'")
+                if correction_result.corrections:
+                    for c in correction_result.corrections:
                         logger.info(f"[FINAL]    └─ {c.get('type', '?')}: {c.get('description', '')}")
 
         logger.info(f"[FINAL] ✅ Output: '{final_text}'")

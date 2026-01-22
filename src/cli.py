@@ -712,14 +712,9 @@ def stream(model: str, language: str, device: Optional[int]):
     help="メニューバー常駐モード (macOS専用)",
 )
 @click.option(
-    "--proofread/--no-proofread",
+    "--phonetic/--no-phonetic",
     default=True,
-    help="校正機能を使用（Python軽量校正）",
-)
-@click.option(
-    "--textlint/--no-textlint",
-    default=False,
-    help="textlint校正を使用（重いため非推奨、代わりにPython軽量校正を使用）",
+    help="音声認識誤り訂正を使用（同音異義語・カタカナ正規化など）",
 )
 def voice(
     hotkey: str,
@@ -730,8 +725,7 @@ def voice(
     dictionary_path: Optional[str],
     gui: bool,
     menubar: bool,
-    proofread: bool,
-    textlint: bool,
+    phonetic: bool,
 ):
     """
     Push-to-Talk 音声入力モード (Aqua Voice風)
@@ -796,8 +790,7 @@ def voice(
         device_id=device,
         use_dictionary=dictionary,
         dictionary_path=Path(dictionary_path) if dictionary_path else None,
-        use_proofreader=proofread,
-        use_textlint=textlint,
+        use_phonetic_correction=phonetic,
     )
 
     hotkey_display = hotkey.replace("_", " ").title()
@@ -1084,14 +1077,9 @@ def dictionary_test(text: str, path: Optional[str]):
     help="辞書ファイルパス",
 )
 @click.option(
-    "--proofread/--no-proofread",
+    "--phonetic/--no-phonetic",
     default=True,
-    help="校正機能を使用（Python軽量校正）",
-)
-@click.option(
-    "--textlint/--no-textlint",
-    default=False,
-    help="textlint校正を使用（重いため非推奨、代わりにPython軽量校正を使用）",
+    help="音声認識誤り訂正を使用（同音異義語・カタカナ正規化など）",
 )
 def voice_single(
     model: str,
@@ -1099,8 +1087,7 @@ def voice_single(
     device: Optional[int],
     dictionary: bool,
     dictionary_path: Optional[str],
-    proofread: bool,
-    textlint: bool,
+    phonetic: bool,
 ):
     """
     シングルショット音声入力モード（外部アプリ連携用）
@@ -1123,8 +1110,7 @@ def voice_single(
     logger.info(f"  Model: {model}")
     logger.info(f"  Language: {language}")
     logger.info(f"  Dictionary: {dictionary}")
-    logger.info(f"  Proofread: {proofread}")
-    logger.info(f"  Textlint: {textlint}")
+    logger.info(f"  PhoneticCorrection: {phonetic}")
 
     whisper_model = WhisperModel(model)
 
@@ -1136,8 +1122,7 @@ def voice_single(
         device_id=device,
         use_dictionary=dictionary,
         dictionary_path=Path(dictionary_path) if dictionary_path else None,
-        use_proofreader=proofread,
-        use_textlint=textlint,
+        use_phonetic_correction=phonetic,
     )
 
     # 終了フラグ
