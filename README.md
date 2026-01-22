@@ -19,6 +19,7 @@ A real-time speech transcription CLI tool using whisper.cpp, optimized for Apple
 - **Metal GPU acceleration** for Apple Silicon
 - **Push-to-Talk voice input** - Hold a key to record, release to transcribe and copy to clipboard
 - **Dictionary feature** - Context-aware word replacement for homophones
+- **ASR Error Correction** - Phonetic-based automatic correction for speech recognition errors (220+ patterns)
 - **GUI mode** - Floating window for visual feedback during voice input
 - **Menu Bar App** - Native macOS menu bar app with popover UI (Swift)
 
@@ -256,7 +257,7 @@ sequenceDiagram
     participant Python as 🐍 voice-single<br/>(Python)
     participant Whisper as 🎤 whisper.cpp
     participant Dict as 📖 Dictionary
-    participant Proof as ✏️ Proofreader
+    participant Phonetic as 🔊 PhoneticCorrector
 
     User->>Swift: Press F9 (hotkey)
     Swift->>Swift: Show popover 🔴
@@ -268,8 +269,8 @@ sequenceDiagram
         Whisper-->>Python: Raw text
         Python->>Dict: Apply dictionary
         Dict-->>Python: Replaced text
-        Python->>Proof: Light proofread
-        Proof-->>Python: Corrected text
+        Python->>Phonetic: ASR error correction
+        Phonetic-->>Python: Corrected text
         Python-->>Swift: PARTIAL:text
         Swift->>Swift: Update popover
     end
@@ -278,12 +279,12 @@ sequenceDiagram
     Swift->>Python: SIGINT (stop)
 
     Python->>Whisper: Final transcribe
-    Whisper-->>Python: 🎤 Raw: "今日は良い天気です"
+    Whisper-->>Python: 🎤 Raw: "ウィスパーでエーアイ"
     Python->>Dict: Apply dictionary
     Dict-->>Python: 📖 (no change)
-    Python->>Proof: Final proofread
-    Proof-->>Python: ✏️ "今日はよい天気です"
-    Python-->>Swift: FINAL:今日はよい天気です
+    Python->>Phonetic: ASR error correction
+    Phonetic-->>Python: 🔊 "WhisperでAI"
+    Python-->>Swift: FINAL:WhisperでAI
 
     Swift->>Swift: Copy to clipboard
     Swift->>Swift: Show result ✓
@@ -304,8 +305,8 @@ flowchart LR
     end
 
     subgraph "Post Processing"
-        DICT[📖 Dictionary<br/>・固有名詞変換<br/>・同音異義語]
-        PROOF[✏️ Python校正<br/>・冗長表現削除<br/>・表記統一<br/>・誤変換修正]
+        DICT[📖 Dictionary<br/>・固有名詞変換<br/>・文脈依存置換]
+        PHONETIC[🔊 PhoneticCorrector<br/>・220+誤りパターン<br/>・音韻距離計算<br/>・ハルシネーション除去<br/>・カタカナ正規化]
     end
 
     subgraph Output
@@ -316,9 +317,9 @@ flowchart LR
     MIC --> MODEL
     MODEL --> STREAM
     STREAM --> |Raw Text| DICT
-    DICT --> |Replaced| PROOF
-    PROOF --> |Final| CLIP
-    PROOF --> |Debug| LOG
+    DICT --> |Replaced| PHONETIC
+    PHONETIC --> |Final| CLIP
+    PHONETIC --> |Debug| LOG
 ```
 
 #### Building the Menu Bar App
@@ -438,6 +439,81 @@ The dictionary is stored at `~/.config/whisper-realtime/dictionary.json`:
 
 **Context rules** check surrounding text (within `window_size` characters) for keywords before replacing. This helps distinguish homophones based on context.
 
+### ASR Error Correction (Phonetic Corrector)
+
+The phonetic corrector automatically fixes common speech recognition errors based on phonetic analysis. This is separate from the dictionary feature and handles:
+
+- **Katakana term correction** - IT/tech terms (ウィスパー → Whisper, エーアイ → AI)
+- **Homophone handling** - Words that sound the same but have different meanings
+- **Hallucination removal** - Repeated phrases that Whisper sometimes generates
+- **Number normalization** - Full-width to half-width conversion (１２３ → 123)
+
+```bash
+# Enable phonetic correction (default: enabled)
+uv run whisper-realtime voice --phonetic
+
+# Disable phonetic correction
+uv run whisper-realtime voice --no-phonetic
+```
+
+#### Correction Examples
+
+| Input (誤認識) | Output (訂正後) | Category |
+|----------------|-----------------|----------|
+| ウィスパー | Whisper | IT/Tech |
+| エーアイ | AI | Abbreviation |
+| パイソン | Python | Programming |
+| ギットハブ | GitHub | Service |
+| クーバネティス | Kubernetes | Infrastructure |
+| 花竹 | 鼻茸 | Medical |
+| 同じ文同じ文同じ文 | 同じ文 | Hallucination |
+
+#### Phonetic Distance Calculation
+
+The corrector uses weighted Levenshtein distance with phoneme confusion pairs:
+
+```
+Phoneme Confusion (low cost = easily confused):
+- Voiced/Unvoiced: k↔g, t↔d, s↔z (cost: 0.3)
+- Sibilants: s↔sh, z↔j, ch↔ts (cost: 0.3-0.4)
+- Japanese-specific: r↔l (cost: 0.2, same in Japanese)
+- Vowels: i↔e, u↔o (cost: 0.4)
+- Long vowels: a↔aa, i↔ii (cost: 0.2)
+```
+
+#### Built-in Error Patterns (220+)
+
+| Category | Count | Examples |
+|----------|-------|----------|
+| IT/Tech Terms | 87+ | Whisper, Claude, Python, Docker, AWS... |
+| Business Terms | 30+ | 異動/移動, 規定/規程... |
+| Medical Terms | 6 | 鼻茸, 鼻血, 肝癌... |
+| Homophones | 50 groups | 機関/期間/器官, 科学/化学... |
+
+#### Programmatic Usage
+
+```python
+from src.phonetic_corrector import PhoneticCorrector
+
+corrector = PhoneticCorrector()
+
+# Basic correction
+result = corrector.correct("ウィスパーでエーアイの認識")
+print(result.corrected_text)  # "WhisperでAIの認識"
+
+# Hallucination detection
+is_hallucination = corrector.detect_hallucination("ありがとうありがとうありがとう")
+print(is_hallucination)  # {'has_hallucination': True, ...}
+
+# Get homophone candidates
+candidates = corrector.get_homophone_candidates("きかん")
+print(candidates)  # ['機関', '期間', '器官', '気管', ...]
+
+# Suggest corrections with phonetic similarity
+suggestions = corrector.suggest_corrections("ウイスパ")
+print(suggestions)  # [{'word': 'ウイスパ', 'suggestions': [('Whisper', 0.14)]}]
+```
+
 ## Models
 
 | Model | Size | Use Case |
@@ -483,6 +559,7 @@ For real-time applications, `tiny` or `base` is recommended.
 | `--vad-threshold` | VAD sensitivity 0-3 (default: 2) |
 | `--no-vad` | Disable VAD filter |
 | `--no-dictionary` | Disable dictionary replacement |
+| `--phonetic/--no-phonetic` | Enable/disable ASR error correction (default: enabled) |
 
 ## System Audio Capture
 
