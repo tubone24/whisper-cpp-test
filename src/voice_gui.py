@@ -111,6 +111,16 @@ class VoiceInputGUI:
         if self._root:
             self._root.after(0, self._show_final)
 
+    def _bring_to_front(self):
+        """ウィンドウを最前面に持ってくる（macOS対応）"""
+        if self._root:
+            # ウィンドウが最小化されていない状態にする
+            self._root.deiconify()
+            # topmost属性を一時的に再設定して最前面に持ってくる
+            self._root.attributes("-topmost", True)
+            self._root.lift()
+            self._root.focus_force()
+
     def _update_status(self):
         """ステータス表示を更新"""
         if self._status_label:
@@ -119,6 +129,8 @@ class VoiceInputGUI:
                     text="🔴 録音中...",
                     fg="#ff6b6b",
                 )
+                # 録音開始時にウィンドウを最前面に持ってくる
+                self._bring_to_front()
             else:
                 self._status_label.config(
                     text=f"🎤 {self.hotkey_name} を押して録音",

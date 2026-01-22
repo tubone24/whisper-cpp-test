@@ -701,6 +701,11 @@ def stream(model: str, language: str, device: Optional[int]):
     default=False,
     help="GUIウィンドウを表示",
 )
+@click.option(
+    "--menubar/--no-menubar",
+    default=False,
+    help="メニューバー常駐モード (macOS専用)",
+)
 def voice(
     hotkey: str,
     model: str,
@@ -709,6 +714,7 @@ def voice(
     dictionary: bool,
     dictionary_path: Optional[str],
     gui: bool,
+    menubar: bool,
 ):
     """
     Push-to-Talk 音声入力モード (Aqua Voice風)
@@ -721,6 +727,7 @@ def voice(
         whisper-realtime voice -k f9              # F9で録音
         whisper-realtime voice -m large-v3-turbo  # 高精度モデルを使用
         whisper-realtime voice --gui              # GUIウィンドウを表示
+        whisper-realtime voice --menubar          # メニューバー常駐モード (macOS)
     """
     from .voice_input import (
         HotkeyType,
@@ -775,6 +782,30 @@ def voice(
     )
 
     hotkey_display = hotkey.replace("_", " ").title()
+
+    # メニューバーモード (macOS専用)
+    if menubar:
+        if sys.platform != "darwin":
+            console.print("[red]エラー: メニューバーモードはmacOS専用です[/red]")
+            sys.exit(1)
+
+        try:
+            from .voice_menubar import MenuBarVoiceInputManager
+        except ImportError as e:
+            console.print(f"[red]エラー: {e}[/red]")
+            console.print("インストール: uv pip install 'whisper-realtime[macos]'")
+            sys.exit(1)
+
+        console.print(f"[green]メニューバーモードで起動中... (ホットキー: {hotkey_display})[/green]")
+
+        try:
+            menubar_manager = MenuBarVoiceInputManager(config)
+            menubar_manager.run()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            console.print("\n[yellow]終了しました[/yellow]")
+        return
 
     # GUIモード
     if gui:
@@ -1004,6 +1035,111 @@ def dictionary_test(text: str, path: Optional[str]):
 
     if text == result:
         console.print("[dim]（変換なし）[/dim]")
+
+
+@cli.command(name="voice-single")
+@click.option(
+    "--model", "-m",
+    type=click.Choice([m.value for m in WhisperModel]),
+    default="base",
+    help="使用するWhisperモデル",
+)
+@click.option(
+    "--language", "-l",
+    default="ja",
+    help="言語コード",
+)
+@click.option(
+    "--device", "-d",
+    type=int,
+    help="マイクデバイスID",
+)
+@click.option(
+    "--dictionary/--no-dictionary",
+    default=True,
+    help="辞書機能を使用",
+)
+@click.option(
+    "--dictionary-path",
+    type=click.Path(),
+    help="辞書ファイルパス",
+)
+def voice_single(
+    model: str,
+    language: str,
+    device: Optional[int],
+    dictionary: bool,
+    dictionary_path: Optional[str],
+):
+    """
+    シングルショット音声入力モード（外部アプリ連携用）
+
+    起動時に録音を開始し、SIGINT (Ctrl+C) で録音を終了して結果を出力。
+    SwiftのMenuBarアプリなど外部から呼び出すためのコマンド。
+
+    出力形式:
+        PARTIAL:<部分結果>
+        FINAL:<最終結果>
+    """
+    from .voice_input import VoiceInputConfig, VoiceInputSession, ClipboardManager, HotkeyType
+    from .dictionary import load_or_create_dictionary
+
+    whisper_model = WhisperModel(model)
+
+    # 設定
+    config = VoiceInputConfig(
+        hotkey=HotkeyType.CTRL_RIGHT,  # 使用しないがデフォルト設定
+        model=whisper_model,
+        language=language,
+        device_id=device,
+        use_dictionary=dictionary,
+        dictionary_path=Path(dictionary_path) if dictionary_path else None,
+    )
+
+    # 終了フラグ
+    running = True
+    session = None
+
+    def on_partial(text: str):
+        """部分結果コールバック"""
+        print(f"PARTIAL:{text}", flush=True)
+
+    def on_final(text: str):
+        """最終結果コールバック"""
+        pass  # stop時に処理
+
+    def signal_handler(sig, frame):
+        nonlocal running
+        running = False
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # セッション作成と録音開始
+    session = VoiceInputSession(
+        config=config,
+        on_partial=on_partial,
+        on_final=on_final,
+    )
+
+    session.start()
+
+    # SIGINTまで待機
+    try:
+        while running:
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        pass
+
+    # 録音停止と結果取得
+    final_text = session.stop()
+
+    if final_text:
+        # クリップボードにコピー
+        ClipboardManager.copy(final_text)
+        print(f"FINAL:{final_text}", flush=True)
+    else:
+        print("FINAL:", flush=True)
 
 
 def main():

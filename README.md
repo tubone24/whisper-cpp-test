@@ -20,6 +20,7 @@ A real-time speech transcription CLI tool using whisper.cpp, optimized for Apple
 - **Push-to-Talk voice input** - Hold a key to record, release to transcribe and copy to clipboard
 - **Dictionary feature** - Context-aware word replacement for homophones
 - **GUI mode** - Floating window for visual feedback during voice input
+- **Menu Bar App** - Native macOS menu bar app with popover UI (Swift)
 
 ## Architecture
 
@@ -235,6 +236,81 @@ When `--gui` is specified, a floating window appears showing:
 - Recording status (idle/recording)
 - Real-time transcription preview
 - Confirmation when text is copied to clipboard
+
+### Menu Bar App (macOS)
+
+For a native macOS experience, you can use the **WhisperMenuBar** app. This provides:
+- 🎤 Menu bar icon that stays in your status bar
+- Native NSPopover UI that appears when recording
+- F9 hotkey to start/stop recording (configurable in source)
+- Automatic clipboard copy of transcription results
+
+![WhisperMenuBar Demo](./docs/images/menubar_app.gif)
+
+#### Building the Menu Bar App
+
+```bash
+# Navigate to the WhisperMenuBar directory
+cd WhisperMenuBar
+
+# Build the app (requires Xcode)
+swift build
+
+# Run the app
+.build/debug/WhisperMenuBar
+```
+
+**Requirements:**
+- Xcode (full installation, not just Command Line Tools)
+- If using Command Line Tools, switch to Xcode:
+  ```bash
+  sudo xcode-select -s /Applications/Xcode.app
+  ```
+
+#### First Run Setup
+
+1. **Accessibility Permission**: On first launch, you'll be prompted to grant accessibility permission. This is required for global hotkey detection.
+   - Go to **System Settings** → **Privacy & Security** → **Accessibility**
+   - Enable permission for `WhisperMenuBar`
+
+2. **Microphone Permission**: When recording starts, you may be prompted to grant microphone access.
+
+#### Usage
+
+1. After launching, a 🎤 icon appears in your menu bar
+2. Press **F9** to start recording (icon changes to 🔴)
+3. Speak your message
+4. Press **F9** again to stop recording
+5. The transcription appears in a popover and is automatically copied to clipboard
+6. After 2 seconds, the popover closes
+
+#### Customization
+
+Edit `WhisperMenuBar/Sources/main.swift` to customize:
+
+```swift
+// Change hotkey (in AppDelegate class)
+private let hotkeyCode: CGKeyCode = 101  // F9 = 101, Right Ctrl = 62
+private let hotkeyName = "F9"
+
+// Change Whisper model
+private let whisperModel = "base"  // tiny, base, small, large-v3-turbo
+
+// Change language
+private let whisperLanguage = "ja"  // ja, en, auto
+```
+
+After changes, rebuild with `swift build`.
+
+#### Creating an App Bundle
+
+To create a standalone `.app` bundle:
+
+```bash
+cd WhisperMenuBar
+./bundle.sh
+open build/WhisperMenuBar.app
+```
 
 ### Dictionary Feature
 
