@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
 whisper-realtime CLI
-リアルタイム音声文字起こしのコマンドラインインターフェース
+Real-time audio transcription command-line interface
 """
 
+import json
 import signal
 import sys
 import threading
 import time
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +23,13 @@ from rich.table import Table
 from rich.text import Text
 from rich.layout import Layout
 from rich.style import Style
+
+
+class OutputFormat(str, Enum):
+    """Output format"""
+    RICH = "rich"
+    JSON = "json"
+    PLAIN = "plain"
 
 from .audio_capture import AudioCapture, AudioConfig, AudioSource, VADFilter
 from .diarization import DiarizationManager
@@ -43,13 +52,13 @@ console = Console()
 
 @dataclass
 class ConversationEntry:
-    """会話エントリー"""
+    """Conversation entry"""
     speaker: str
     text: str
     timestamp: float
 
 
-# 話者ごとの色
+# Speaker colors
 SPEAKER_COLORS = [
     "cyan",
     "green",
@@ -61,7 +70,7 @@ SPEAKER_COLORS = [
 
 
 class RealtimeDisplay:
-    """リアルタイム表示マネージャー（スタック表示対応）"""
+    """Real-time display manager with stack display support"""
 
     def __init__(self, show_speaker: bool = False, max_history: int = 50):
         self.show_speaker = show_speaker
@@ -74,14 +83,14 @@ class RealtimeDisplay:
         self._lock = threading.Lock()
 
     def _get_speaker_color(self, speaker: str) -> str:
-        """話者の色を取得（なければ割り当て）"""
+        """Get speaker color (assign if not exists)"""
         if speaker not in self._speaker_colors:
             self._speaker_colors[speaker] = SPEAKER_COLORS[self._color_index % len(SPEAKER_COLORS)]
             self._color_index += 1
         return self._speaker_colors[speaker]
 
     def update(self, text: str, is_partial: bool = False, speaker: str = ""):
-        """テキストを更新"""
+        """Update text"""
         with self._lock:
             if speaker:
                 self.current_speaker = speaker
@@ -89,40 +98,40 @@ class RealtimeDisplay:
             if is_partial:
                 self.partial_text = text
             else:
-                # 確定テキストを会話履歴に追加
+                # Add confirmed text to conversation history
                 final_text = self.partial_text if self.partial_text else text
                 if final_text:
                     entry = ConversationEntry(
-                        speaker=self.current_speaker or "話者",
+                        speaker=self.current_speaker or "Speaker",
                         text=final_text,
                         timestamp=time.time(),
                     )
                     self.conversation_history.append(entry)
 
-                    # 履歴の上限を超えたら古いものを削除
+                    # Remove old entries if exceeds max
                     if len(self.conversation_history) > self.max_history:
                         self.conversation_history = self.conversation_history[-self.max_history:]
 
                 self.partial_text = ""
 
-                # 新しいテキストがあれば追加
+                # Add new text if different
                 if text and text != final_text:
                     entry = ConversationEntry(
-                        speaker=self.current_speaker or "話者",
+                        speaker=self.current_speaker or "Speaker",
                         text=text,
                         timestamp=time.time(),
                     )
                     self.conversation_history.append(entry)
 
     def _render_history(self) -> Panel:
-        """会話履歴パネルを生成"""
+        """Generate conversation history panel"""
         content = Text()
 
         if not self.conversation_history:
-            content.append("(会話履歴なし)", style="dim")
+            content.append("(No conversation history)", style="dim")
         else:
-            # 最新の会話を表示
-            display_entries = self.conversation_history[-30:]  # 最新30件
+            # Show latest conversations
+            display_entries = self.conversation_history[-30:]  # Latest 30
 
             for entry in display_entries:
                 if self.show_speaker:
@@ -132,13 +141,13 @@ class RealtimeDisplay:
 
         return Panel(
             content,
-            title="[bold blue]会話履歴[/bold blue]",
+            title="[bold blue]History[/bold blue]",
             border_style="blue",
             padding=(0, 1),
         )
 
     def _render_live(self) -> Panel:
-        """リアルタイム文字起こしパネルを生成"""
+        """Generate real-time transcription panel"""
         content = Text()
 
         if self.partial_text:
@@ -147,18 +156,18 @@ class RealtimeDisplay:
                 content.append(f"[{self.current_speaker}] ", style=f"bold {color}")
             content.append(self.partial_text, style="italic")
         else:
-            content.append("🎤 音声を待機中...", style="dim")
+            content.append("Waiting for audio...", style="dim")
 
         return Panel(
             content,
-            title="[bold green]リアルタイム[/bold green]",
-            subtitle="[dim]Ctrl+C で終了[/dim]",
+            title="[bold green]Real-time[/bold green]",
+            subtitle="[dim]Ctrl+C to stop[/dim]",
             border_style="green",
             padding=(0, 1),
         )
 
     def render(self) -> Group:
-        """表示用コンテンツを生成（履歴 + リアルタイム）"""
+        """Generate display content (history + real-time)"""
         with self._lock:
             return Group(
                 self._render_history(),
@@ -166,7 +175,7 @@ class RealtimeDisplay:
             )
 
     def get_full_text(self) -> str:
-        """全テキストを取得"""
+        """Get full text"""
         with self._lock:
             lines = []
             for entry in self.conversation_history:
@@ -179,15 +188,93 @@ class RealtimeDisplay:
             return "\n".join(lines)
 
 
+class JSONOutput:
+    """JSON Lines output manager (for Raycast Extension)"""
+
+    def __init__(self, show_speaker: bool = False):
+        self.show_speaker = show_speaker
+        self.conversation_history: list[ConversationEntry] = []
+        self._lock = threading.Lock()
+        self._start_time = time.time()
+
+    def _emit(self, data: dict):
+        """Emit JSON line"""
+        print(json.dumps(data, ensure_ascii=False), flush=True)
+
+    def update(self, text: str, is_partial: bool = False, speaker: str = ""):
+        """Update text and emit JSON"""
+        with self._lock:
+            timestamp = time.time() - self._start_time
+
+            if is_partial:
+                self._emit({
+                    "type": "partial",
+                    "speaker": speaker or "",
+                    "text": text,
+                    "timestamp": round(timestamp, 2),
+                })
+            else:
+                # Final text
+                entry = ConversationEntry(
+                    speaker=speaker or "Speaker",
+                    text=text,
+                    timestamp=time.time(),
+                )
+                self.conversation_history.append(entry)
+
+                self._emit({
+                    "type": "final",
+                    "speaker": speaker or "",
+                    "text": text,
+                    "timestamp": round(timestamp, 2),
+                })
+
+    def emit_status(self, status: str, message: str = ""):
+        """Emit status message"""
+        self._emit({
+            "type": "status",
+            "status": status,
+            "message": message,
+            "timestamp": round(time.time() - self._start_time, 2),
+        })
+
+    def emit_error(self, error: str):
+        """Emit error message"""
+        self._emit({
+            "type": "error",
+            "error": error,
+            "timestamp": round(time.time() - self._start_time, 2),
+        })
+
+    def emit_level(self, level: float):
+        """Emit audio level"""
+        self._emit({
+            "type": "level",
+            "level": round(level, 3),
+            "timestamp": round(time.time() - self._start_time, 2),
+        })
+
+    def get_full_text(self) -> str:
+        """Get full text"""
+        with self._lock:
+            lines = []
+            for entry in self.conversation_history:
+                if self.show_speaker:
+                    lines.append(f"[{entry.speaker}] {entry.text}")
+                else:
+                    lines.append(entry.text)
+            return "\n".join(lines)
+
+
 def list_audio_devices():
-    """オーディオデバイス一覧を表示"""
+    """List available audio devices"""
     devices = AudioCapture.list_devices()
 
-    table = Table(title="利用可能なオーディオデバイス")
+    table = Table(title="Available Audio Devices")
     table.add_column("ID", style="cyan")
-    table.add_column("名前", style="green")
-    table.add_column("チャンネル", style="yellow")
-    table.add_column("デフォルト", style="magenta")
+    table.add_column("Name", style="green")
+    table.add_column("Channels", style="yellow")
+    table.add_column("Default", style="magenta")
 
     for device in devices:
         table.add_row(
@@ -199,53 +286,53 @@ def list_audio_devices():
 
     console.print(table)
 
-    # システム音声キャプチャのステータス
-    console.print("\n[bold]システム音声キャプチャ:[/bold]")
+    # System audio capture status
+    console.print("\n[bold]System Audio Capture:[/bold]")
 
-    # ScreenCaptureKit確認
+    # ScreenCaptureKit check
     try:
         from .system_audio_capture import is_screencapturekit_available, get_screencapturekit_error
         if is_screencapturekit_available():
-            console.print("  [green]✓ ScreenCaptureKit[/green] - BlackHole不要でシステム音声をキャプチャ可能")
+            console.print("  [green]✓ ScreenCaptureKit[/green] - Can capture system audio without BlackHole")
         else:
-            error = get_screencapturekit_error() or "不明なエラー"
-            console.print(f"  [yellow]○ ScreenCaptureKit[/yellow] - 利用不可: {error}")
+            error = get_screencapturekit_error() or "Unknown error"
+            console.print(f"  [yellow]○ ScreenCaptureKit[/yellow] - Not available: {error}")
     except ImportError:
-        console.print("  [dim]○ ScreenCaptureKit[/dim] - モジュール未インストール")
+        console.print("  [dim]○ ScreenCaptureKit[/dim] - Module not installed")
 
-    # BlackHole検出
+    # BlackHole detection
     blackhole_id = AudioCapture.find_blackhole_device()
     if blackhole_id is not None:
-        console.print(f"  [green]✓ BlackHole[/green] - デバイスID: {blackhole_id}")
+        console.print(f"  [green]✓ BlackHole[/green] - Device ID: {blackhole_id}")
     else:
-        console.print("  [dim]○ BlackHole[/dim] - 未インストール")
+        console.print("  [dim]○ BlackHole[/dim] - Not installed")
 
-    console.print("\n[dim]ScreenCaptureKitを有効にするには:[/dim]")
+    console.print("\n[dim]To enable ScreenCaptureKit:[/dim]")
     console.print("  uv pip install 'whisper-realtime[macos]'")
-    console.print("  システム設定 > プライバシー > 画面収録 で許可")
+    console.print("  System Preferences > Privacy > Screen Recording")
 
 
 def list_models(models_path: Path):
-    """利用可能なモデル一覧を表示"""
-    table = Table(title="利用可能なWhisperモデル")
-    table.add_column("モデル", style="cyan")
-    table.add_column("サイズ", style="yellow")
-    table.add_column("ステータス", style="green")
-    table.add_column("推奨用途", style="magenta")
+    """List available models"""
+    table = Table(title="Available Whisper Models")
+    table.add_column("Model", style="cyan")
+    table.add_column("Size", style="yellow")
+    table.add_column("Status", style="green")
+    table.add_column("Recommended Use", style="magenta")
 
     model_info = {
-        "tiny": ("~75MB", "最速、リアルタイム向け"),
-        "tiny.en": ("~75MB", "英語のみ、最速"),
-        "base": ("~142MB", "バランス型"),
-        "base.en": ("~142MB", "英語のみ、バランス"),
-        "small": ("~466MB", "高精度"),
-        "small.en": ("~466MB", "英語のみ、高精度"),
-        "medium": ("~1.5GB", "より高精度"),
-        "medium.en": ("~1.5GB", "英語のみ"),
-        "large-v1": ("~2.9GB", "最高精度"),
-        "large-v2": ("~2.9GB", "最高精度v2"),
-        "large-v3": ("~2.9GB", "最高精度v3"),
-        "large-v3-turbo": ("~1.5GB", "高精度+高速"),
+        "tiny": ("~75MB", "Fastest, real-time"),
+        "tiny.en": ("~75MB", "English only, fastest"),
+        "base": ("~142MB", "Balanced"),
+        "base.en": ("~142MB", "English only, balanced"),
+        "small": ("~466MB", "High accuracy"),
+        "small.en": ("~466MB", "English only, high accuracy"),
+        "medium": ("~1.5GB", "Higher accuracy"),
+        "medium.en": ("~1.5GB", "English only"),
+        "large-v1": ("~2.9GB", "Best accuracy"),
+        "large-v2": ("~2.9GB", "Best accuracy v2"),
+        "large-v3": ("~2.9GB", "Best accuracy v3"),
+        "large-v3-turbo": ("~1.5GB", "High accuracy + fast"),
     }
 
     for model in WhisperModel:
@@ -256,38 +343,38 @@ def list_models(models_path: Path):
         table.add_row(
             model.value,
             size,
-            "[green]インストール済[/green]" if exists else "[dim]未インストール[/dim]",
+            "[green]Installed[/green]" if exists else "[dim]Not installed[/dim]",
             usage,
         )
 
     console.print(table)
-    console.print("\nモデルのダウンロード:")
+    console.print("\nDownload models:")
     console.print("  ./setup.sh --model <model-name>")
 
 
 @click.group()
 def cli():
-    """whisper-realtime: リアルタイム音声文字起こし"""
+    """whisper-realtime: Real-time audio transcription"""
     pass
 
 
 @cli.command()
 def devices():
-    """オーディオデバイス一覧を表示"""
+    """List available audio devices"""
     list_audio_devices()
 
 
 @cli.command()
-@click.option("--device", "-d", type=int, help="マイクデバイスID")
-@click.option("--duration", type=int, default=5, help="テスト時間（秒）")
+@click.option("--device", "-d", type=int, help="Microphone device ID")
+@click.option("--duration", type=int, default=5, help="Test duration (seconds)")
 def test_mic(device: Optional[int], duration: int):
-    """マイク入力をテスト（音声レベルを表示）"""
+    """Test microphone input (show audio level)"""
     from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
     audio_config = AudioConfig(sample_rate=16000, chunk_duration=0.1)
 
-    console.print(f"[bold]マイクテスト[/bold] ({duration}秒間)")
-    console.print("話しかけてください...\n")
+    console.print(f"[bold]Microphone Test[/bold] ({duration} seconds)")
+    console.print("Please speak...\n")
 
     try:
         audio_capture = AudioCapture(
@@ -296,10 +383,10 @@ def test_mic(device: Optional[int], duration: int):
             device_id=device,
         )
     except Exception as e:
-        console.print(f"[red]エラー: マイクを開けません: {e}[/red]")
-        console.print("\n[yellow]ヒント:[/yellow]")
-        console.print("  1. システム環境設定 > プライバシーとセキュリティ > マイク")
-        console.print("  2. ターミナルアプリにマイクアクセスを許可")
+        console.print(f"[red]Error: Cannot open microphone: {e}[/red]")
+        console.print("\n[yellow]Hint:[/yellow]")
+        console.print("  1. System Preferences > Privacy & Security > Microphone")
+        console.print("  2. Allow terminal app to access microphone")
         return
 
     start_time = time.time()
@@ -321,22 +408,22 @@ def test_mic(device: Optional[int], duration: int):
     console.print("\n")
 
     if max_level > 5:
-        console.print(f"[green]✓ マイクは正常に動作しています[/green] (最大レベル: {max_level})")
+        console.print(f"[green]✓ Microphone is working correctly[/green] (max level: {max_level})")
     elif max_level > 0:
-        console.print(f"[yellow]△ 音声レベルが低いです[/yellow] (最大レベル: {max_level})")
-        console.print("  マイクに近づいて話してみてください")
+        console.print(f"[yellow]△ Audio level is low[/yellow] (max level: {max_level})")
+        console.print("  Try speaking closer to the microphone")
     else:
-        console.print("[red]✗ 音声が検出されませんでした[/red]")
-        console.print("\n[yellow]確認事項:[/yellow]")
-        console.print("  1. マイクがミュートになっていないか確認")
-        console.print("  2. システム環境設定でマイク入力を確認")
-        console.print("  3. uv run whisper-realtime devices で正しいデバイスを確認")
+        console.print("[red]✗ No audio detected[/red]")
+        console.print("\n[yellow]Check:[/yellow]")
+        console.print("  1. Make sure microphone is not muted")
+        console.print("  2. Check microphone input in system settings")
+        console.print("  3. Run 'uv run whisper-realtime devices' to check device")
 
 
 @cli.command()
-@click.option("--path", type=click.Path(exists=True), help="モデルディレクトリ")
+@click.option("--path", type=click.Path(exists=True), help="Model directory")
 def models(path: Optional[str]):
-    """利用可能なモデル一覧を表示"""
+    """List available models"""
     models_path = Path(path) if path else Path(__file__).parent.parent / "models"
     list_models(models_path)
 
@@ -346,70 +433,81 @@ def models(path: Optional[str]):
     "--source", "-s",
     type=click.Choice(["mic", "system", "both"]),
     default="mic",
-    help="音声入力ソース",
+    help="Audio input source",
 )
 @click.option(
     "--model", "-m",
     type=click.Choice([m.value for m in WhisperModel]),
     default="base",
-    help="使用するWhisperモデル",
+    help="Whisper model to use",
 )
 @click.option(
     "--profile", "-p",
     type=click.Choice(list(MODEL_PROFILES.keys())),
-    help="モデルプロファイル (realtime/balanced/quality/best)",
+    help="Model profile (realtime/balanced/quality/best)",
 )
 @click.option(
     "--language", "-l",
     default="ja",
-    help="言語コード (ja, en, auto)",
+    help="Language code (ja, en, auto)",
 )
 @click.option(
     "--device", "-d",
     type=int,
-    help="マイクデバイスID",
+    help="Microphone device ID",
 )
 @click.option(
     "--system-device",
     type=int,
-    help="システム音声デバイスID (BlackHole)",
+    help="System audio device ID (BlackHole)",
 )
 @click.option(
     "--speaker/--no-speaker",
     default=False,
-    help="話者分離を有効化",
+    help="Enable speaker diarization",
 )
 @click.option(
     "--translate/--no-translate",
     default=False,
-    help="英語に翻訳",
+    help="Translate to English",
 )
 @click.option(
     "--output", "-o",
     type=click.Path(),
-    help="出力ファイルパス",
+    help="Output file path",
 )
 @click.option(
     "--step",
     type=int,
     default=500,
-    help="処理ステップ (ms)",
+    help="Processing step (ms)",
 )
 @click.option(
     "--length",
     type=int,
     default=3000,
-    help="処理窓の長さ (ms) - 短いほど反応が早い",
+    help="Processing window length (ms) - shorter means faster response",
 )
 @click.option(
     "--vad/--no-vad",
     default=True,
-    help="音声区間検出を使用",
+    help="Use voice activity detection",
 )
 @click.option(
     "--debug/--no-debug",
     default=False,
-    help="デバッグモード（処理状況を表示）",
+    help="Debug mode (show processing status)",
+)
+@click.option(
+    "--output-format", "-f",
+    type=click.Choice(["rich", "json", "plain"]),
+    default="rich",
+    help="Output format (rich: terminal UI, json: JSON Lines, plain: plain text)",
+)
+@click.option(
+    "--record", "-r",
+    type=click.Path(),
+    help="Record audio and save to WAV file (specify path)",
 )
 def start(
     source: str,
@@ -425,9 +523,15 @@ def start(
     length: int,
     vad: bool,
     debug: bool,
+    output_format: str,
+    record: Optional[str],
 ):
-    """リアルタイム文字起こしを開始"""
+    """Start real-time transcription"""
     import os
+
+    # 出力形式の判定
+    use_json = output_format == "json"
+    use_plain = output_format == "plain"
 
     # デバッグモードの場合、環境変数を設定
     if debug:
@@ -439,18 +543,33 @@ def start(
     else:
         whisper_model = WhisperModel(model)
 
-    # 設定表示
-    console.print(Panel.fit(
-        f"[bold]設定[/bold]\n"
-        f"モデル: {whisper_model.value}\n"
-        f"言語: {language}\n"
-        f"ソース: {source}\n"
-        f"話者分離: {'有効' if speaker else '無効'}\n"
-        f"処理ステップ: {step}ms\n"
-        f"処理窓: {length}ms",
-        title="whisper-realtime",
-        border_style="blue",
-    ))
+    # 録音用バッファ
+    recorded_audio: list = [] if record else None
+
+    # 出力マネージャー（形式に応じて切り替え）
+    if use_json:
+        display = JSONOutput(show_speaker=speaker)
+        display.emit_status("starting", f"model={whisper_model.value}, language={language}, record={record or 'disabled'}")
+    else:
+        display = RealtimeDisplay(show_speaker=speaker)
+        # Show settings (rich/plain format only)
+        if not use_plain:
+            settings_lines = [
+                f"[bold]Settings[/bold]",
+                f"Model: {whisper_model.value}",
+                f"Language: {language}",
+                f"Source: {source}",
+                f"Speaker diarization: {'Enabled' if speaker else 'Disabled'}",
+                f"Processing step: {step}ms",
+                f"Processing window: {length}ms",
+            ]
+            if record:
+                settings_lines.append(f"[green]Recording: {record}[/green]")
+            console.print(Panel.fit(
+                "\n".join(settings_lines),
+                title="whisper-realtime",
+                border_style="blue",
+            ))
 
     # 音声ソース設定
     audio_source = {
@@ -476,9 +595,6 @@ def start(
     # 話者分離マネージャー
     diarizer = DiarizationManager(use_pyannote=False) if speaker else None
 
-    # 表示マネージャー
-    display = RealtimeDisplay(show_speaker=speaker)
-
     # VADフィルター
     vad_filter = VADFilter() if vad else None
 
@@ -494,16 +610,22 @@ def start(
     def signal_handler(sig, frame):
         nonlocal running
         running = False
-        console.print("\n[yellow]終了中...[/yellow]")
+        if use_json:
+            display.emit_status("stopping")
+        else:
+            console.print("\n[yellow]Stopping...[/yellow]")
 
     signal.signal(signal.SIGINT, signal_handler)
 
-    # Whisperエンジン初期化
+    # Initialize Whisper engine
     try:
         engine = WhisperEngine(whisper_config)
     except FileNotFoundError as e:
-        console.print(f"[red]エラー: {e}[/red]")
-        console.print("\n[yellow]setup.sh を実行してセットアップしてください[/yellow]")
+        if use_json:
+            display.emit_error(str(e))
+        else:
+            console.print(f"[red]Error: {e}[/red]")
+            console.print("\n[yellow]Please run setup.sh to complete setup[/yellow]")
         sys.exit(1)
 
     # 結果コールバック
@@ -520,7 +642,7 @@ def start(
 
     engine.set_callback(on_result)
 
-    # 音声キャプチャ開始
+    # Start audio capture
     try:
         audio_capture = AudioCapture(
             config=audio_config,
@@ -529,43 +651,45 @@ def start(
             system_device_id=system_device,
         )
     except Exception as e:
-        console.print(f"[red]音声キャプチャエラー: {e}[/red]")
+        if use_json:
+            display.emit_error(f"Audio capture error: {e}")
+        else:
+            console.print(f"[red]Audio capture error: {e}[/red]")
         sys.exit(1)
 
-    console.print("\n[green]録音開始... (Ctrl+C で終了)[/green]")
-    if debug:
-        console.print("[dim]デバッグモード: 処理状況を表示します[/dim]")
-    console.print()
+    if use_json:
+        display.emit_status("recording")
+    else:
+        console.print("\n[green]Recording started... (Ctrl+C to stop)[/green]")
+        if debug:
+            console.print("[dim]Debug mode: showing processing status[/dim]")
+        console.print()
 
     audio_chunks_received = 0
     last_debug_time = time.time()
 
     try:
         with audio_capture:
-            with Live(display.render(), console=console, refresh_per_second=4) as live:
+            # JSON形式の場合はLiveを使わない
+            if use_json:
                 while running:
-                    # 音声データを取得
                     audio = audio_capture.get_audio(timeout=0.1)
 
                     if audio is not None and len(audio) > 0:
                         audio_chunks_received += 1
 
-                        # デバッグ: 音声レベル表示
-                        if debug and time.time() - last_debug_time > 1.0:
-                            rms = np.sqrt(np.mean(audio ** 2))
-                            buffer_dur = engine.get_buffer_duration()
-                            console.print(
-                                f"[dim]音声レベル: {rms:.4f} | "
-                                f"バッファ: {buffer_dur:.1f}s / {length/1000:.1f}s | "
-                                f"チャンク: {audio_chunks_received}[/dim]"
-                            )
-                            last_debug_time = time.time()
+                        # 音声レベルを計算して出力
+                        rms = np.sqrt(np.mean(audio ** 2))
+                        level = min(float(rms * 10), 1.0)
+                        display.emit_level(level)
+
+                        # 録音用に音声を蓄積（VAD前の生データ）
+                        if recorded_audio is not None:
+                            recorded_audio.append(audio.copy())
 
                         # VADフィルタリング
                         if vad_filter and vad_filter.enabled:
                             if not vad_filter.is_speech(audio):
-                                if debug:
-                                    pass  # 無音スキップ
                                 continue
 
                         # 話者分離
@@ -578,34 +702,117 @@ def start(
                         # 十分なデータが溜まったら処理
                         buffer_duration = engine.get_buffer_duration()
                         if buffer_duration >= length / 1000:
-                            if debug:
-                                console.print(f"[dim]→ 文字起こし実行中... ({buffer_duration:.1f}s)[/dim]")
                             engine.process_realtime()
-
-                    # 表示更新
-                    live.update(display.render())
 
                 # 最終処理
                 final = engine.finalize()
                 if final:
                     display.update(final.text, is_partial=False)
-                    live.update(display.render())
+
+            else:
+                # Rich形式の場合はLive表示
+                with Live(display.render(), console=console, refresh_per_second=4) as live:
+                    while running:
+                        audio = audio_capture.get_audio(timeout=0.1)
+
+                        if audio is not None and len(audio) > 0:
+                            audio_chunks_received += 1
+
+                            # 録音用に音声を蓄積（VAD前の生データ）
+                            if recorded_audio is not None:
+                                recorded_audio.append(audio.copy())
+
+                            # Debug: show audio level
+                            if debug and time.time() - last_debug_time > 1.0:
+                                rms = np.sqrt(np.mean(audio ** 2))
+                                buffer_dur = engine.get_buffer_duration()
+                                console.print(
+                                    f"[dim]Audio level: {rms:.4f} | "
+                                    f"Buffer: {buffer_dur:.1f}s / {length/1000:.1f}s | "
+                                    f"Chunks: {audio_chunks_received}[/dim]"
+                                )
+                                last_debug_time = time.time()
+
+                            # VADフィルタリング
+                            if vad_filter and vad_filter.enabled:
+                                if not vad_filter.is_speech(audio):
+                                    continue
+
+                            # 話者分離
+                            if speaker and diarizer:
+                                diarizer.process_audio(audio)
+
+                            # Whisperエンジンにデータ追加
+                            engine.add_audio(audio)
+
+                            # Process when enough data is buffered
+                            buffer_duration = engine.get_buffer_duration()
+                            if buffer_duration >= length / 1000:
+                                if debug:
+                                    console.print(f"[dim]→ Transcribing... ({buffer_duration:.1f}s)[/dim]")
+                                engine.process_realtime()
+
+                        # 表示更新
+                        live.update(display.render())
+
+                    # 最終処理
+                    final = engine.finalize()
+                    if final:
+                        display.update(final.text, is_partial=False)
+                        live.update(display.render())
 
     except Exception as e:
-        console.print(f"[red]エラー: {e}[/red]")
-        import traceback
-        traceback.print_exc()
+        if use_json:
+            display.emit_error(str(e))
+        else:
+            console.print(f"[red]Error: {e}[/red]")
+            import traceback
+            traceback.print_exc()
 
     # 結果出力
     full_text = display.get_full_text()
 
-    if output:
+    if use_json:
+        display.emit_status("completed", full_text)
+    else:
+        if output:
+            output_path = Path(output)
+            output_path.write_text(full_text, encoding="utf-8")
+            console.print(f"\n[green]Output saved: {output_path}[/green]")
+
+        console.print("\n[bold]Transcription result:[/bold]")
+        console.print(Panel(full_text or "(none)", border_style="green"))
+
+    # ファイル出力（json形式でも-oオプション指定時は出力）
+    if output and use_json:
         output_path = Path(output)
         output_path.write_text(full_text, encoding="utf-8")
-        console.print(f"\n[green]出力保存: {output_path}[/green]")
 
-    console.print("\n[bold]文字起こし結果:[/bold]")
-    console.print(Panel(full_text or "(なし)", border_style="green"))
+    # 録音した音声をWAVファイルに保存
+    if record and recorded_audio:
+        import wave
+
+        record_path = Path(record)
+        # 拡張子が.wavでなければ追加
+        if record_path.suffix.lower() != ".wav":
+            record_path = record_path.with_suffix(".wav")
+
+        # 録音データを結合
+        all_audio = np.concatenate(recorded_audio)
+        # float32からint16に変換
+        audio_int16 = (all_audio * 32767).astype(np.int16)
+
+        with wave.open(str(record_path), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)  # 16-bit
+            wf.setframerate(16000)
+            wf.writeframes(audio_int16.tobytes())
+
+        duration_sec = len(all_audio) / 16000
+        if use_json:
+            display.emit_status("recorded", f"saved={record_path}, duration={duration_sec:.1f}s")
+        else:
+            console.print(f"\n[green]Recording saved: {record_path} ({duration_sec:.1f}s)[/green]")
 
 
 @cli.command()
@@ -613,22 +820,22 @@ def start(
     "--model", "-m",
     type=click.Choice([m.value for m in WhisperModel]),
     default="base",
-    help="使用するWhisperモデル",
+    help="Whisper model to use",
 )
 @click.option(
     "--language", "-l",
     default="ja",
-    help="言語コード",
+    help="Language code",
 )
 @click.option(
     "--device", "-d",
     type=int,
-    help="オーディオデバイスID",
+    help="Audio device ID",
 )
 def stream(model: str, language: str, device: Optional[int]):
     """
-    whisper.cpp stream を使用したストリーミング文字起こし
-    (whisper.cpp の stream バイナリが必要)
+    Streaming transcription using whisper.cpp stream
+    (requires whisper.cpp stream binary)
     """
 
     whisper_model = WhisperModel(model)
@@ -639,7 +846,7 @@ def stream(model: str, language: str, device: Optional[int]):
     def on_text(text: str, is_partial: bool):
         display.update(text, is_partial=is_partial)
 
-    console.print("[green]ストリーミング開始... (Ctrl+C で終了)[/green]\n")
+    console.print("[green]Streaming started... (Ctrl+C to stop)[/green]\n")
 
     try:
         engine = StreamingWhisperEngine(config)
@@ -653,12 +860,12 @@ def stream(model: str, language: str, device: Optional[int]):
                 live.update(display.render())
 
     except FileNotFoundError as e:
-        console.print(f"[red]エラー: {e}[/red]")
-        console.print("\n[yellow]whisper.cpp の stream バイナリをビルドしてください[/yellow]")
+        console.print(f"[red]Error: {e}[/red]")
+        console.print("\n[yellow]Please build the whisper.cpp stream binary[/yellow]")
     except KeyboardInterrupt:
         pass
 
-    console.print("\n[bold]結果:[/bold]")
+    console.print("\n[bold]Result:[/bold]")
     console.print(display.get_full_text())
 
 
@@ -673,48 +880,48 @@ def stream(model: str, language: str, device: Optional[int]):
         "caps_lock", "scroll_lock", "pause",
     ]),
     default="ctrl_r",
-    help="録音開始/停止のホットキー",
+    help="Hotkey to start/stop recording",
 )
 @click.option(
     "--model", "-m",
     type=click.Choice([m.value for m in WhisperModel]),
     default="base",
-    help="使用するWhisperモデル",
+    help="Whisper model to use",
 )
 @click.option(
     "--language", "-l",
     default="ja",
-    help="言語コード",
+    help="Language code",
 )
 @click.option(
     "--device", "-d",
     type=int,
-    help="マイクデバイスID",
+    help="Microphone device ID",
 )
 @click.option(
     "--dictionary/--no-dictionary",
     default=True,
-    help="辞書機能を使用",
+    help="Use dictionary feature",
 )
 @click.option(
     "--dictionary-path",
     type=click.Path(),
-    help="辞書ファイルパス",
+    help="Dictionary file path",
 )
 @click.option(
     "--gui/--no-gui",
     default=False,
-    help="GUIウィンドウを表示",
+    help="Show GUI window",
 )
 @click.option(
     "--menubar/--no-menubar",
     default=False,
-    help="メニューバー常駐モード (macOS専用)",
+    help="Menu bar mode (macOS only)",
 )
 @click.option(
     "--phonetic/--no-phonetic",
     default=True,
-    help="音声認識誤り訂正を使用（同音異義語・カタカナ正規化など）",
+    help="Use ASR error correction (homophone disambiguation, katakana normalization, etc.)",
 )
 def voice(
     hotkey: str,
@@ -728,17 +935,17 @@ def voice(
     phonetic: bool,
 ):
     """
-    Push-to-Talk 音声入力モード (Aqua Voice風)
+    Push-to-Talk voice input mode (Aqua Voice style)
 
-    指定したホットキーを押している間、音声を録音し、
-    離すと文字起こし結果をクリップボードにコピーします。
+    Records audio while holding the specified hotkey,
+    and copies transcription to clipboard when released.
 
-    使用例:
-        whisper-realtime voice                    # 右Ctrlで録音
-        whisper-realtime voice -k f9              # F9で録音
-        whisper-realtime voice -m large-v3-turbo  # 高精度モデルを使用
-        whisper-realtime voice --gui              # GUIウィンドウを表示
-        whisper-realtime voice --menubar          # メニューバー常駐モード (macOS)
+    Examples:
+        whisper-realtime voice                    # Record with Right Ctrl
+        whisper-realtime voice -k f9              # Record with F9
+        whisper-realtime voice -m large-v3-turbo  # Use high-accuracy model
+        whisper-realtime voice --gui              # Show GUI window
+        whisper-realtime voice --menubar          # Menu bar mode (macOS)
     """
     from .voice_input import (
         HotkeyType,
@@ -748,21 +955,21 @@ def voice(
         check_dependencies,
     )
 
-    # 依存関係チェック
+    # Check dependencies
     deps = check_dependencies()
 
     if not deps.get("pynput", False):
-        console.print("[red]エラー: pynput がインストールされていません[/red]")
-        console.print("インストール: uv pip install pynput")
+        console.print("[red]Error: pynput is not installed[/red]")
+        console.print("Install: uv pip install pynput")
         sys.exit(1)
 
-    # Linux環境でのツールチェック
+    # Check tools for Linux environment
     if sys.platform == "linux":
         has_clipboard = deps.get("xclip") or deps.get("xsel") or deps.get("wl-copy")
 
         if not has_clipboard:
-            console.print("[yellow]警告: クリップボードツールがありません[/yellow]")
-            console.print("  インストール: sudo apt install xclip")
+            console.print("[yellow]Warning: No clipboard tool available[/yellow]")
+            console.print("  Install: sudo apt install xclip")
 
     # ホットキー変換
     hotkey_map = {
@@ -795,20 +1002,20 @@ def voice(
 
     hotkey_display = hotkey.replace("_", " ").title()
 
-    # メニューバーモード (macOS専用)
+    # Menu bar mode (macOS only)
     if menubar:
         if sys.platform != "darwin":
-            console.print("[red]エラー: メニューバーモードはmacOS専用です[/red]")
+            console.print("[red]Error: Menu bar mode is only available on macOS[/red]")
             sys.exit(1)
 
         try:
             from .voice_menubar import MenuBarVoiceInputManager
         except ImportError as e:
-            console.print(f"[red]エラー: {e}[/red]")
-            console.print("インストール: uv pip install 'whisper-realtime[macos]'")
+            console.print(f"[red]Error: {e}[/red]")
+            console.print("Install: uv pip install 'whisper-realtime[macos]'")
             sys.exit(1)
 
-        console.print(f"[green]メニューバーモードで起動中... (ホットキー: {hotkey_display})[/green]")
+        console.print(f"[green]Starting menu bar mode... (Hotkey: {hotkey_display})[/green]")
 
         try:
             menubar_manager = MenuBarVoiceInputManager(config)
@@ -816,42 +1023,42 @@ def voice(
         except KeyboardInterrupt:
             pass
         finally:
-            console.print("\n[yellow]終了しました[/yellow]")
+            console.print("\n[yellow]Exited[/yellow]")
         return
 
-    # GUIモード
+    # GUI mode
     if gui:
         from .voice_gui import GUIVoiceInputManager
 
-        console.print(f"[green]GUIモードで起動中... (ホットキー: {hotkey_display})[/green]")
+        console.print(f"[green]Starting GUI mode... (Hotkey: {hotkey_display})[/green]")
 
         try:
             gui_manager = GUIVoiceInputManager(config)
-            gui_manager.run()  # メインスレッドでGUI実行
+            gui_manager.run()  # Run GUI in main thread
         except KeyboardInterrupt:
             pass
         finally:
-            console.print("\n[yellow]終了しました[/yellow]")
+            console.print("\n[yellow]Exited[/yellow]")
         return
 
-    # CLIモード
+    # CLI mode
     console.print(Panel.fit(
-        f"[bold]Push-to-Talk 音声入力[/bold]\n\n"
-        f"ホットキー: [cyan]{hotkey_display}[/cyan]\n"
-        f"モデル: {model}\n"
-        f"言語: {language}\n"
-        f"辞書: {'有効' if dictionary else '無効'}\n\n"
-        f"[dim]ホットキーを押している間、音声を録音します\n"
-        f"離すと文字起こし結果をクリップボードにコピーします\n"
-        f"Ctrl+C で終了[/dim]",
+        f"[bold]Push-to-Talk Voice Input[/bold]\n\n"
+        f"Hotkey: [cyan]{hotkey_display}[/cyan]\n"
+        f"Model: {model}\n"
+        f"Language: {language}\n"
+        f"Dictionary: {'Enabled' if dictionary else 'Disabled'}\n\n"
+        f"[dim]Hold the hotkey to record audio\n"
+        f"Release to copy transcription to clipboard\n"
+        f"Ctrl+C to exit[/dim]",
         title="whisper-realtime voice",
         border_style="green",
     ))
 
-    # 辞書ファイルパス表示
+    # Show dictionary file path
     if dictionary:
         dict_path = Path(dictionary_path) if dictionary_path else get_default_dictionary_path()
-        console.print(f"[dim]辞書ファイル: {dict_path}[/dim]\n")
+        console.print(f"[dim]Dictionary file: {dict_path}[/dim]\n")
 
     try:
         manager = VoiceInputManager(config)
@@ -862,18 +1069,18 @@ def voice(
         manager.set_output_callback(on_output)
 
         with manager:
-            console.print("[green]準備完了！ホットキーを押して録音を開始してください[/green]")
-            # メインループ
+            console.print("[green]Ready! Press hotkey to start recording[/green]")
+            # Main loop
             while True:
                 time.sleep(0.1)
 
     except KeyboardInterrupt:
-        console.print("\n[yellow]終了しました[/yellow]")
+        console.print("\n[yellow]Exited[/yellow]")
 
 
 @cli.group()
 def dictionary():
-    """辞書機能の管理"""
+    """Manage dictionary feature"""
     pass
 
 
@@ -881,45 +1088,45 @@ def dictionary():
 @click.option(
     "--path",
     type=click.Path(),
-    help="辞書ファイルパス",
+    help="Dictionary file path",
 )
 def dictionary_show(path: Optional[str]):
-    """現在の辞書を表示"""
+    """Show current dictionary"""
     dict_path = Path(path) if path else get_default_dictionary_path()
 
     if not dict_path.exists():
-        console.print(f"[yellow]辞書ファイルが見つかりません: {dict_path}[/yellow]")
-        console.print("'whisper-realtime dictionary init' で作成できます")
+        console.print(f"[yellow]Dictionary file not found: {dict_path}[/yellow]")
+        console.print("Create with 'whisper-realtime dictionary init'")
         return
 
     dictionary = Dictionary.from_json(dict_path)
     data = dictionary.to_dict()
 
-    console.print(f"[bold]辞書ファイル:[/bold] {dict_path}\n")
+    console.print(f"[bold]Dictionary file:[/bold] {dict_path}\n")
 
-    # 単純置換ルール
+    # Simple replacement rules
     if data.get("replacements"):
-        table = Table(title="単純置換ルール")
-        table.add_column("置換元", style="cyan")
-        table.add_column("置換先", style="green")
-        table.add_column("正規表現", style="yellow")
+        table = Table(title="Simple Replacement Rules")
+        table.add_column("Pattern", style="cyan")
+        table.add_column("Replacement", style="green")
+        table.add_column("Regex", style="yellow")
 
         for rule in data["replacements"]:
             table.add_row(
                 rule["pattern"],
                 rule["replacement"],
-                "○" if rule.get("is_regex") else "",
+                "Yes" if rule.get("is_regex") else "",
             )
         console.print(table)
         console.print()
 
-    # 文脈ルール
+    # Context rules
     if data.get("context_rules"):
-        table = Table(title="文脈に応じた置換ルール")
-        table.add_column("置換元", style="cyan")
-        table.add_column("置換先", style="green")
-        table.add_column("文脈キーワード", style="magenta")
-        table.add_column("除外キーワード", style="red")
+        table = Table(title="Context-aware Replacement Rules")
+        table.add_column("Pattern", style="cyan")
+        table.add_column("Replacement", style="green")
+        table.add_column("Context Keywords", style="magenta")
+        table.add_column("Negative Keywords", style="red")
 
         for rule in data["context_rules"]:
             table.add_row(
@@ -935,32 +1142,32 @@ def dictionary_show(path: Optional[str]):
 @click.option(
     "--path",
     type=click.Path(),
-    help="辞書ファイルパス",
+    help="Dictionary file path",
 )
 @click.option(
     "--force/--no-force", "-f",
     default=False,
-    help="既存ファイルを上書き",
+    help="Overwrite existing file",
 )
 def dictionary_init(path: Optional[str], force: bool):
-    """サンプル辞書を作成"""
+    """Create sample dictionary"""
     dict_path = Path(path) if path else get_default_dictionary_path()
 
     if dict_path.exists() and not force:
-        console.print(f"[yellow]辞書ファイルが既に存在します: {dict_path}[/yellow]")
-        console.print("上書きするには -f オプションを使用してください")
+        console.print(f"[yellow]Dictionary file already exists: {dict_path}[/yellow]")
+        console.print("Use -f option to overwrite")
         return
 
-    # 親ディレクトリ作成
+    # Create parent directory
     dict_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # サンプル辞書作成
+    # Create sample dictionary
     example_data = create_example_dictionary()
     dictionary = Dictionary.from_dict(example_data)
     dictionary.save_json(dict_path)
 
-    console.print(f"[green]辞書ファイルを作成しました: {dict_path}[/green]")
-    console.print("\n[dim]このファイルを編集して、カスタム置換ルールを追加できます[/dim]")
+    console.print(f"[green]Dictionary file created: {dict_path}[/green]")
+    console.print("\n[dim]Edit this file to add custom replacement rules[/dim]")
 
 
 @dictionary.command(name="add")
@@ -969,22 +1176,22 @@ def dictionary_init(path: Optional[str], force: bool):
 @click.option(
     "--context", "-c",
     multiple=True,
-    help="文脈キーワード（複数指定可）",
+    help="Context keywords (can specify multiple)",
 )
 @click.option(
     "--path",
     type=click.Path(),
-    help="辞書ファイルパス",
+    help="Dictionary file path",
 )
 def dictionary_add(pattern: str, replacement: str, context: tuple, path: Optional[str]):
-    """辞書にルールを追加
+    """Add rule to dictionary
 
-    例:
-        whisper-realtime dictionary add 家具 KAG -c 会社 -c 開発
+    Example:
+        whisper-realtime dictionary add "kagu" "KAG" -c company -c development
     """
     dict_path = Path(path) if path else get_default_dictionary_path()
 
-    # 辞書読み込み
+    # Load dictionary
     if dict_path.exists():
         dictionary = Dictionary.from_json(dict_path)
     else:
@@ -993,9 +1200,9 @@ def dictionary_add(pattern: str, replacement: str, context: tuple, path: Optiona
 
     data = dictionary.to_dict()
 
-    # ルール追加
+    # Add rule
     if context:
-        # 文脈ルール
+        # Context rule
         data["context_rules"].append({
             "pattern": pattern,
             "replacement": replacement,
@@ -1003,21 +1210,21 @@ def dictionary_add(pattern: str, replacement: str, context: tuple, path: Optiona
             "negative_keywords": [],
             "window_size": 50,
         })
-        console.print(f"[green]文脈ルールを追加:[/green] {pattern} → {replacement}")
-        console.print(f"  文脈キーワード: {', '.join(context)}")
+        console.print(f"[green]Context rule added:[/green] {pattern} → {replacement}")
+        console.print(f"  Context keywords: {', '.join(context)}")
     else:
-        # 単純置換ルール
+        # Simple replacement rule
         data["replacements"].append({
             "pattern": pattern,
             "replacement": replacement,
             "is_regex": False,
         })
-        console.print(f"[green]単純置換ルールを追加:[/green] {pattern} → {replacement}")
+        console.print(f"[green]Simple rule added:[/green] {pattern} → {replacement}")
 
-    # 保存
+    # Save
     dictionary = Dictionary.from_dict(data)
     dictionary.save_json(dict_path)
-    console.print(f"[dim]保存: {dict_path}[/dim]")
+    console.print(f"[dim]Saved: {dict_path}[/dim]")
 
 
 @dictionary.command(name="test")
@@ -1025,28 +1232,28 @@ def dictionary_add(pattern: str, replacement: str, context: tuple, path: Optiona
 @click.option(
     "--path",
     type=click.Path(),
-    help="辞書ファイルパス",
+    help="Dictionary file path",
 )
 def dictionary_test(text: str, path: Optional[str]):
-    """辞書による変換をテスト
+    """Test dictionary transformation
 
-    例:
-        whisper-realtime dictionary test "家具という会社について"
+    Example:
+        whisper-realtime dictionary test "kagu company info"
     """
     dict_path = Path(path) if path else get_default_dictionary_path()
 
     if not dict_path.exists():
-        console.print(f"[yellow]辞書ファイルが見つかりません: {dict_path}[/yellow]")
+        console.print(f"[yellow]Dictionary file not found: {dict_path}[/yellow]")
         return
 
     dictionary = Dictionary.from_json(dict_path)
     result = dictionary.apply(text)
 
-    console.print(f"[dim]入力:[/dim] {text}")
-    console.print(f"[green]出力:[/green] {result}")
+    console.print(f"[dim]Input:[/dim] {text}")
+    console.print(f"[green]Output:[/green] {result}")
 
     if text == result:
-        console.print("[dim]（変換なし）[/dim]")
+        console.print("[dim](no changes)[/dim]")
 
 
 @cli.command(name="voice-single")
@@ -1054,32 +1261,32 @@ def dictionary_test(text: str, path: Optional[str]):
     "--model", "-m",
     type=click.Choice([m.value for m in WhisperModel]),
     default="base",
-    help="使用するWhisperモデル",
+    help="Whisper model to use",
 )
 @click.option(
     "--language", "-l",
     default="ja",
-    help="言語コード",
+    help="Language code",
 )
 @click.option(
     "--device", "-d",
     type=int,
-    help="マイクデバイスID",
+    help="Microphone device ID",
 )
 @click.option(
     "--dictionary/--no-dictionary",
     default=True,
-    help="辞書機能を使用",
+    help="Use dictionary feature",
 )
 @click.option(
     "--dictionary-path",
     type=click.Path(),
-    help="辞書ファイルパス",
+    help="Dictionary file path",
 )
 @click.option(
     "--phonetic/--no-phonetic",
     default=True,
-    help="音声認識誤り訂正を使用（同音異義語・カタカナ正規化など）",
+    help="Use ASR error correction (homophone disambiguation, katakana normalization, etc.)",
 )
 def voice_single(
     model: str,
@@ -1090,14 +1297,14 @@ def voice_single(
     phonetic: bool,
 ):
     """
-    シングルショット音声入力モード（外部アプリ連携用）
+    Single-shot voice input mode (for external app integration)
 
-    起動時に録音を開始し、SIGINT (Ctrl+C) で録音を終了して結果を出力。
-    SwiftのMenuBarアプリなど外部から呼び出すためのコマンド。
+    Starts recording on launch, stops and outputs result on SIGINT (Ctrl+C).
+    Command designed to be called from external apps like Swift MenuBar app.
 
-    出力形式:
-        stdout: PARTIAL:<部分結果> / FINAL:<最終結果>
-        stderr: デバッグログ（タイムスタンプ付き）
+    Output format:
+        stdout: PARTIAL:<partial result> / FINAL:<final result>
+        stderr: Debug logs (with timestamps)
     """
     import logging
 
@@ -1138,6 +1345,16 @@ def voice_single(
         """最終結果コールバック"""
         pass  # stop時に処理
 
+    def on_level(level: float):
+        """音声レベルコールバック"""
+        print(f"LEVEL:{level:.3f}", flush=True)
+
+    def on_spectrum(spectrum: list[float]):
+        """スペクトラムコールバック"""
+        # カンマ区切りで出力（例: SPECTRUM:0.1,0.2,0.3,...）
+        spectrum_str = ",".join(f"{v:.3f}" for v in spectrum)
+        print(f"SPECTRUM:{spectrum_str}", flush=True)
+
     def signal_handler(sig, frame):
         nonlocal running
         logger.info(f"Signal received: {sig}")
@@ -1152,6 +1369,8 @@ def voice_single(
         config=config,
         on_partial=on_partial,
         on_final=on_final,
+        on_level=on_level,
+        on_spectrum=on_spectrum,
     )
 
     logger.info("Starting recording...")
