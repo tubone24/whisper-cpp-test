@@ -13,7 +13,7 @@ echo ""
 
 # Clone and build whisper.cpp
 setup_whisper_cpp() {
-    echo "[1/6] Setting up whisper.cpp..."
+    echo "[1/7] Setting up whisper.cpp..."
 
     if [ -d "$WHISPER_DIR" ]; then
         echo "whisper.cpp already cloned. Updating..."
@@ -57,7 +57,7 @@ setup_whisper_cpp() {
 # Download models
 download_models() {
     echo ""
-    echo "[2/6] Downloading models..."
+    echo "[2/7] Downloading models..."
 
     mkdir -p "$MODELS_DIR"
     cd "$WHISPER_DIR"
@@ -91,7 +91,7 @@ download_models() {
 # Setup Python environment using uv
 setup_python() {
     echo ""
-    echo "[3/6] Setting up Python environment (uv)..."
+    echo "[3/7] Setting up Python environment (uv)..."
 
     cd "$SCRIPT_DIR"
 
@@ -113,7 +113,7 @@ setup_python() {
 # Python軽量校正がデフォルトで有効なため、textlintは通常不要
 setup_textlint() {
     echo ""
-    echo "[4/6] Skipping textlint setup (Python軽量校正を使用)..."
+    echo "[4/7] Skipping textlint setup (Python軽量校正を使用)..."
     echo "  textlintを使用したい場合は --with-textlint オプションを使用してください"
     echo "  例: ./setup.sh --with-textlint"
 }
@@ -121,7 +121,7 @@ setup_textlint() {
 # textlintをインストールする関数（オプショナル）
 setup_textlint_optional() {
     echo ""
-    echo "[4/6] Setting up textlint (optional, 重い処理)..."
+    echo "[4/7] Setting up textlint (optional, 重い処理)..."
 
     # Check if Node.js is installed
     if ! command -v node &> /dev/null; then
@@ -175,7 +175,7 @@ EOF
 # Build WhisperMenuBar
 build_menubar_app() {
     echo ""
-    echo "[5/6] Building WhisperMenuBar..."
+    echo "[5/7] Building WhisperMenuBar..."
 
     MENUBAR_DIR="$SCRIPT_DIR/WhisperMenuBar"
 
@@ -198,10 +198,56 @@ build_menubar_app() {
     fi
 }
 
+# Build Raycast Extension
+setup_raycast_extension() {
+    echo ""
+    echo "[6/7] Building Raycast Extension..."
+
+    RAYCAST_DIR="$SCRIPT_DIR/raycast-extension"
+
+    if [ ! -d "$RAYCAST_DIR" ]; then
+        echo "raycast-extension directory not found. Skipping..."
+        return
+    fi
+
+    cd "$RAYCAST_DIR"
+
+    # Check if Node.js is installed
+    if ! command -v node &> /dev/null; then
+        echo "Node.js is not installed. Installing via Homebrew..."
+        if command -v brew &> /dev/null; then
+            brew install node
+        else
+            echo "Warning: Homebrew not found. Please install Node.js manually."
+            echo "  https://nodejs.org/"
+            return
+        fi
+    fi
+
+    # Install dependencies
+    echo "Installing npm dependencies..."
+    npm install
+
+    # Build extension
+    echo "Building Raycast extension..."
+    npm run build
+
+    echo ""
+    echo "Raycast Extension build complete!"
+    echo ""
+    echo "To use the extension in Raycast:"
+    echo "  1. Open Raycast"
+    echo "  2. Type 'Import Extension' and select it"
+    echo "  3. Choose the directory: $RAYCAST_DIR"
+    echo ""
+    echo "Or for development mode:"
+    echo "  cd $RAYCAST_DIR && npm run dev"
+}
+
 # Show audio setup information
 show_audio_setup_info() {
     echo ""
-    echo "[6/6] Audio Configuration"
+    echo "[7/7] Audio Configuration"
     echo ""
     echo "■ Microphone Input:"
     echo "  → No additional setup required. Ready to use."
@@ -235,6 +281,7 @@ main() {
     SKIP_MODELS=false
     SKIP_PYTHON=false
     SKIP_MENUBAR=false
+    SKIP_RAYCAST=false
     WITH_TEXTLINT=false
 
     while [[ $# -gt 0 ]]; do
@@ -255,6 +302,10 @@ main() {
                 SKIP_MENUBAR=true
                 shift
                 ;;
+            --skip-raycast)
+                SKIP_RAYCAST=true
+                shift
+                ;;
             --with-textlint)
                 WITH_TEXTLINT=true
                 shift
@@ -271,6 +322,7 @@ main() {
                 echo "  --skip-models     Skip model download"
                 echo "  --skip-python     Skip Python environment setup"
                 echo "  --skip-menubar    Skip WhisperMenuBar build"
+                echo "  --skip-raycast    Skip Raycast extension build"
                 echo "  --with-textlint   Install textlint (optional, 重い処理)"
                 echo "  --model <name>    Download additional model"
                 echo "                    (tiny, base, small, medium, large-v3, large-v3-turbo,"
@@ -317,6 +369,10 @@ main() {
         build_menubar_app
     fi
 
+    if [ "$SKIP_RAYCAST" = false ]; then
+        setup_raycast_extension
+    fi
+
     show_audio_setup_info
 
     echo "=== Setup Complete ==="
@@ -331,6 +387,10 @@ main() {
     echo ""
     echo "WhisperMenuBar (Native Swift app):"
     echo "  ./WhisperMenuBar/.build/debug/WhisperMenuBar"
+    echo ""
+    echo "Raycast Extension:"
+    echo "  Open Raycast → 'Import Extension' → select ./raycast-extension"
+    echo "  Or for development: cd raycast-extension && npm run dev"
     echo ""
     echo "Models:"
     echo "  Default: large-v3-turbo (best for streaming with optimized params)"

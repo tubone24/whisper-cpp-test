@@ -16,10 +16,8 @@ import * as os from "os";
 import * as path from "path";
 import {
   getWhisperProcess,
-  resetWhisperProcess,
   TranscriptionEntry,
   WhisperPreferences,
-  getSpeakerColor,
   generateRecordingFilename,
   StartOptions,
 } from "./utils/whisper";
@@ -417,7 +415,13 @@ export default function StartTranscription() {
           />
           <Detail.Metadata.Label
             title="Audio Source"
-            text={state.audioSource === "mic" ? "Microphone" : state.audioSource === "system" ? "System Audio" : "Both"}
+            text={
+              state.audioSource === "mic"
+                ? "Microphone"
+                : state.audioSource === "system"
+                  ? "System Audio"
+                  : "Both"
+            }
           />
           <Detail.Metadata.Label
             title="Processing"
@@ -491,19 +495,25 @@ export default function StartTranscription() {
           <ActionPanel.Section title="Audio Source">
             <Action
               title="Use Microphone"
-              icon={state.audioSource === "mic" ? Icon.CheckCircle : Icon.Microphone}
+              icon={
+                state.audioSource === "mic" ? Icon.CheckCircle : Icon.Microphone
+              }
               onAction={() => setAudioSource("mic")}
               shortcut={{ modifiers: ["cmd"], key: "1" }}
             />
             <Action
               title="Use System Audio"
-              icon={state.audioSource === "system" ? Icon.CheckCircle : Icon.Speaker}
+              icon={
+                state.audioSource === "system" ? Icon.CheckCircle : Icon.Speaker
+              }
               onAction={() => setAudioSource("system")}
               shortcut={{ modifiers: ["cmd"], key: "2" }}
             />
             <Action
               title="Use Both"
-              icon={state.audioSource === "both" ? Icon.CheckCircle : Icon.SpeakerOn}
+              icon={
+                state.audioSource === "both" ? Icon.CheckCircle : Icon.SpeakerOn
+              }
               onAction={() => setAudioSource("both")}
               shortcut={{ modifiers: ["cmd"], key: "3" }}
             />

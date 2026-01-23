@@ -1,7 +1,7 @@
 import { readFile, writeFile, mkdir } from "fs/promises";
 import { existsSync } from "fs";
 import { homedir } from "os";
-import { join, dirname } from "path";
+import { join } from "path";
 
 // Dictionary file path matching Python implementation
 export const DICTIONARY_DIR = join(homedir(), ".config", "whisper-realtime");
