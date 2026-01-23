@@ -55,6 +55,8 @@ class PhoneticCorrectorConfig:
     enable_hallucination_removal: bool = True
     # 敬語の正規化
     enable_honorific_normalization: bool = False
+    # 文末句点の自動追加
+    enable_sentence_ending_punctuation: bool = True
     # 訂正候補の類似度閾値（0-1、低いほど厳格）
     correction_threshold: float = 0.4
     # ハルシネーション検出の繰り返し回数閾値
@@ -771,6 +773,83 @@ HONORIFIC_PATTERNS_POLITE = {
 
 
 # ============================================================
+# 文末句点の自動追加パターン
+# ============================================================
+
+# 文末を示す表現パターン（正規表現）
+# これらのパターンで終わっている文に句点が付いていない場合に追加
+SENTENCE_ENDING_PATTERNS = [
+    # 丁寧語（です/ます調）
+    r'です(?![。？！\?!])',  # 〜です
+    r'ます(?![。？！\?!])',  # 〜ます
+    r'でした(?![。？！\?!])',  # 〜でした
+    r'ました(?![。？！\?!])',  # 〜ました
+    r'ません(?![。？！\?!])',  # 〜ません
+    r'でしょう(?![。？！\?!か])',  # 〜でしょう（疑問は除く）
+    r'ましょう(?![。？！\?!か])',  # 〜ましょう
+
+    # 普通体（だ/である調）
+    r'(?<=[^い])だ(?![。？！\?!ろけれと])',  # 〜だ（「だろう」「だけ」「だれ」「だと」は除外）
+    r'である(?![。？！\?!])',  # 〜である
+    r'だった(?![。？！\?!])',  # 〜だった
+    r'であった(?![。？！\?!])',  # 〜であった
+    r'だろう(?![。？！\?!か])',  # 〜だろう
+    r'であろう(?![。？！\?!])',  # 〜であろう
+
+    # 動詞終止形（五段活用）
+    r'(?<=[かきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをんがぎぐげござじずぜぞだぢづでどばびぶべぼぱぴぷぺぽ])う(?![。？！\?!]|[ぁ-ん])',  # 〜う
+    r'[かきくけこさしすせそたちつてとはひふへほまみむめもやゆよらりるれろわをがぎぐげござじずぜぞばびぶべぼぱぴぷぺぽ]る(?![。？！\?!]|[ぁ-ん])',  # 動詞終止形（〜る）
+
+    # 過去形
+    r'(?<=[いっんでしちり])た(?![。？！\?!い]|[ぁ-ん])',  # 〜た（連用形の後の過去形）
+
+    # 否定形
+    r'ない(?![。？！\?!で])',  # 〜ない
+    r'なかった(?![。？！\?!])',  # 〜なかった
+
+    # 形容詞終止形
+    r'[いうくすつぬふむゆる]い(?![。？！\?!]|[ぁ-ん])',  # 形容詞〜い
+
+    # 終助詞（疑問以外）
+    r'[よねさわ](?![。？！\?!]|[ぁ-ん])',  # 終助詞（よ、ね、さ、わ）
+
+    # その他の文末表現
+    r'ございます(?![。？！\?!])',  # 〜ございます
+    r'おります(?![。？！\?!])',  # 〜おります
+    r'いたします(?![。？！\?!])',  # 〜いたします
+    r'くださいませ(?![。？！\?!])',  # 〜くださいませ
+    r'思います(?![。？！\?!])',  # 〜思います
+    r'考えます(?![。？！\?!])',  # 〜考えます
+]
+
+# 文末として扱わない例外パターン（上記パターンより優先）
+SENTENCE_ENDING_EXCEPTIONS = [
+    r'ですが',  # 逆接
+    r'ますが',  # 逆接
+    r'ですので',  # 理由
+    r'ますので',  # 理由
+    r'ですから',  # 理由
+    r'ますから',  # 理由
+    r'ですけど',  # 逆接
+    r'ますけど',  # 逆接
+    r'だから',  # 理由
+    r'だけど',  # 逆接
+    r'だが',  # 逆接
+    r'だと',  # 引用
+    r'だという',  # 引用
+    r'だって',  # 引用
+    r'である以上',  # 接続
+    r'であるから',  # 理由
+    r'であるが',  # 逆接
+    r'ないと',  # 条件
+    r'ないので',  # 理由
+    r'ないから',  # 理由
+    r'ないが',  # 逆接
+    r'ないけど',  # 逆接
+]
+
+
+# ============================================================
 # カタカナ表記揺れの正規化
 # ============================================================
 
@@ -906,6 +985,13 @@ class PhoneticCorrector:
         # 6. 敬語の正規化（オプション）
         if self.config.enable_honorific_normalization:
             new_result, corrs = self._normalize_honorifics(result)
+            if new_result != result:
+                corrections.extend(corrs)
+                result = new_result
+
+        # 7. 文末句点の自動追加
+        if self.config.enable_sentence_ending_punctuation:
+            new_result, corrs = self._add_sentence_ending_punctuation(result)
             if new_result != result:
                 corrections.extend(corrs)
                 result = new_result
@@ -1072,6 +1158,72 @@ class PhoneticCorrector:
                     'type': 'honorific_normalization',
                     'description': f'敬語正規化: {honorific} → {plain}'
                 })
+
+        return result, corrections
+
+    def _add_sentence_ending_punctuation(self, text: str) -> tuple[str, list[dict]]:
+        """
+        文末に句点（。）を自動追加する
+
+        「〜です」「〜ます」「〜だ」などの文末表現の後に
+        句点がない場合に自動的に追加する。
+        """
+        corrections = []
+        result = text
+
+        if not result:
+            return result, corrections
+
+        # まず例外パターンをチェック（文末として扱わない表現）
+        for exception_pattern in SENTENCE_ENDING_EXCEPTIONS:
+            if re.search(exception_pattern + r'$', result):
+                # 例外パターンで終わっている場合は句点を追加しない
+                return result, corrections
+
+        # 既に句点・疑問符・感嘆符で終わっている場合は何もしない
+        if re.search(r'[。？！\?!]$', result):
+            return result, corrections
+
+        # テキスト末尾のみをチェックして句点を追加
+        # 文末パターンを優先度順にチェック（長いパターンを先に）
+        sentence_ending_patterns_sorted = [
+            # 高確実性パターン（これらで終わっていればほぼ確実に文末）
+            (r'(ございます)$', 'ございます。'),
+            (r'(おります)$', 'おります。'),
+            (r'(いたします)$', 'いたします。'),
+            (r'(くださいませ)$', 'くださいませ。'),
+            (r'(思います)$', '思います。'),
+            (r'(考えます)$', '考えます。'),
+            (r'(でした)$', 'でした。'),
+            (r'(ました)$', 'ました。'),
+            (r'(ません)$', 'ません。'),
+            (r'(でしょう)$', 'でしょう。'),
+            (r'(ましょう)$', 'ましょう。'),
+            (r'(です)$', 'です。'),
+            (r'(ます)$', 'ます。'),
+            (r'(であった)$', 'であった。'),
+            (r'(だった)$', 'だった。'),
+            (r'(である)$', 'である。'),
+            (r'(だろう)$', 'だろう。'),
+            (r'(であろう)$', 'であろう。'),
+            (r'(なかった)$', 'なかった。'),
+            (r'(ない)$', 'ない。'),
+            # 「だ」は前の文字が「い」でない場合のみ
+            (r'([^い])(だ)$', r'\1だ。'),
+        ]
+
+        for pattern, replacement in sentence_ending_patterns_sorted:
+            match = re.search(pattern, result)
+            if match:
+                new_result = re.sub(pattern, replacement, result)
+                if new_result != result:
+                    original_ending = match.group(0)
+                    corrections.append({
+                        'type': 'sentence_ending_punctuation',
+                        'description': f'文末句点追加: {original_ending} → {original_ending}。'
+                    })
+                    result = new_result
+                break  # 1回だけ適用
 
         return result, corrections
 

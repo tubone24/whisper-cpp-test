@@ -89,6 +89,73 @@ class VoiceInputConfig:
     sound_feedback: bool = True  # 開始/終了音
 
 
+def compute_spectrum(audio: np.ndarray, num_bands: int = 8) -> list[float]:
+    """
+    音声データからFFTを計算し、周波数帯域ごとのレベルを返す
+
+    Args:
+        audio: 16kHz音声データ（float32）
+        num_bands: 出力する周波数帯域の数
+
+    Returns:
+        各周波数帯域のレベル（0.0-1.0の範囲）
+    """
+    # サンプル数が足りない場合はゼロパディング
+    min_samples = 512
+    if len(audio) < min_samples:
+        audio = np.pad(audio, (0, min_samples - len(audio)), mode='constant')
+
+    # ハミング窓を適用
+    window = np.hamming(len(audio))
+    windowed = audio * window
+
+    # FFT実行
+    fft = np.fft.rfft(windowed)
+    magnitude = np.abs(fft)
+
+    # 周波数帯域に分割（対数スケールで分割）
+    # 人間の聴覚に近い対数スケールで分割
+    sample_rate = 16000
+    freq_bins = np.fft.rfftfreq(len(audio), 1.0 / sample_rate)
+
+    # 周波数範囲: 20Hz - 8000Hz（Nyquist以下）
+    min_freq = 20
+    max_freq = min(8000, sample_rate // 2)
+
+    # 対数スケールで周波数帯域を分割
+    log_min = np.log10(min_freq)
+    log_max = np.log10(max_freq)
+    band_edges = np.logspace(log_min, log_max, num_bands + 1)
+
+    levels = []
+    for i in range(num_bands):
+        # この帯域の周波数範囲に該当するビンを選択
+        low_freq = band_edges[i]
+        high_freq = band_edges[i + 1]
+
+        # 周波数ビンのインデックスを取得
+        mask = (freq_bins >= low_freq) & (freq_bins < high_freq)
+
+        if np.any(mask):
+            # 帯域内のRMS値を計算
+            band_magnitude = magnitude[mask]
+            band_level = np.sqrt(np.mean(band_magnitude ** 2))
+        else:
+            band_level = 0.0
+
+        levels.append(band_level)
+
+    # 正規化（0-1の範囲に）
+    max_level = max(levels) if levels else 1.0
+    if max_level > 0:
+        # 全体の最大値で正規化し、さらに見やすいようにスケーリング
+        levels = [min(l / max_level * 1.5, 1.0) for l in levels]
+    else:
+        levels = [0.0] * num_bands
+
+    return levels
+
+
 class ClipboardManager:
     """クリップボード操作"""
 
@@ -250,10 +317,14 @@ class VoiceInputSession:
         config: VoiceInputConfig,
         on_partial: Optional[Callable[[str], None]] = None,
         on_final: Optional[Callable[[str], None]] = None,
+        on_level: Optional[Callable[[float], None]] = None,
+        on_spectrum: Optional[Callable[[list[float]], None]] = None,
     ):
         self.config = config
         self.on_partial = on_partial
         self.on_final = on_final
+        self.on_level = on_level
+        self.on_spectrum = on_spectrum
 
         self._is_recording = False
         self._audio_buffer: list[np.ndarray] = []
@@ -337,6 +408,18 @@ class VoiceInputSession:
                 while self._is_recording:
                     audio = self._capture.get_audio(timeout=0.1)
                     if audio is not None and len(audio) > 0:
+                        # 音声レベルを計算してコールバック（VAD前の生データで計算）
+                        if self.on_level:
+                            rms = float(np.sqrt(np.mean(audio ** 2)))
+                            # 0-1の範囲に正規化（一般的なマイク入力の場合）
+                            level = min(rms * 10, 1.0)
+                            self.on_level(level)
+
+                        # スペクトラムを計算してコールバック
+                        if self.on_spectrum:
+                            spectrum = compute_spectrum(audio, num_bands=8)
+                            self.on_spectrum(spectrum)
+
                         # VADフィルタリング（完全にスキップせず、音声ありの部分のみ記録）
                         if vad and vad.enabled:
                             if vad.is_speech(audio):

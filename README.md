@@ -22,6 +22,8 @@ A real-time speech transcription CLI tool using whisper.cpp, optimized for Apple
 - **ASR Error Correction** - Phonetic-based automatic correction for speech recognition errors (220+ patterns)
 - **GUI mode** - Floating window for visual feedback during voice input
 - **Menu Bar App** - Native macOS menu bar app with popover UI (Swift)
+- **Raycast Extension** - Native Raycast integration with real-time transcription display
+- **Audio Recording** - Record audio while transcribing with `--record` option
 
 ## Architecture
 
@@ -190,6 +192,15 @@ uv run whisper-realtime start --speaker
 # Save output to file
 uv run whisper-realtime start -o transcript.txt
 
+# Record audio while transcribing
+uv run whisper-realtime start --record recording.wav
+
+# Record with speaker diarization and text output
+uv run whisper-realtime start --speaker --record meeting.wav -o meeting.txt
+
+# JSON output format (for external tools like Raycast)
+uv run whisper-realtime start --output-format json --speaker
+
 # Debug mode (show audio levels)
 uv run whisper-realtime start --debug
 
@@ -237,6 +248,71 @@ When `--gui` is specified, a floating window appears showing:
 - Recording status (idle/recording)
 - Real-time transcription preview
 - Confirmation when text is copied to clipboard
+
+### Raycast Extension
+
+A native [Raycast](https://raycast.com/) extension for real-time transcription with a beautiful UI.
+
+![Raycast Extension](./docs/images/raycast_extension.gif)
+
+#### Features
+
+- Real-time transcription display with timestamps
+- Speaker diarization with color-coded indicators (🔵 🟢 🟡 🟣 🔴 🟠)
+- Copy transcription to clipboard with ⌘C
+- Save transcription to file with ⌘⇧S
+- Start/stop recording with ⌘R/⌘S
+
+#### Installation
+
+```bash
+# Navigate to the Raycast extension directory
+cd raycast-extension
+
+# Install dependencies
+npm install
+
+# Start development mode
+npm run dev
+```
+
+Then open Raycast, search for "Start Transcription" and configure the extension:
+
+1. **whisper-realtime Path**: Set to this project's root directory (e.g., `/Users/your-name/whisper-realtime`)
+2. **Model**: Select your preferred Whisper model (large-v3-turbo recommended)
+3. **Language**: Choose transcription language
+4. **Speaker Diarization**: Enable/disable speaker identification
+
+#### Building for Distribution
+
+```bash
+cd raycast-extension
+npm run build
+```
+
+#### Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| ⌘R | Start Recording |
+| ⌘S | Stop Recording |
+| ⌘C | Copy to Clipboard |
+| ⌘⇧S | Save to File |
+| ⌘⌫ | Clear Transcription |
+
+#### Display Format
+
+The transcription is displayed with:
+- **Timestamps**: `0:05` format showing when each segment was spoken
+- **Speaker Icons**: 🔵 🟢 🟡 🟣 🔴 🟠 for different speakers
+- **Partial/Final Indicators**: Partial transcriptions shown in italics with "(typing...)"
+
+Example:
+```
+`0:00` 🔵 **話者0**: こんにちは
+`0:02` 🟢 **話者1**: はい、こんにちは
+`0:05` 🔵 **話者0**: *今日の議題は...* (typing...)
+```
 
 ### Menu Bar App (macOS)
 
@@ -541,7 +617,9 @@ For real-time applications, `tiny` or `base` is recommended.
 | `--system-device` | System audio device ID |
 | `--speaker` | Enable speaker diarization |
 | `--translate` | Translate to English |
-| `-o, --output` | Output file path |
+| `-o, --output` | Output file path (text) |
+| `-r, --record` | Record audio to WAV file |
+| `-f, --output-format` | Output format: `rich`, `json`, `plain` |
 | `--step` | Processing step (ms) |
 | `--length` | Processing window length (ms) |
 | `--vad/--no-vad` | Voice activity detection |
