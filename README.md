@@ -255,6 +255,16 @@ A native [Raycast](https://raycast.com/) extension for real-time transcription w
 
 ![Raycast Extension](./docs/images/raycast_extension.gif)
 
+#### Commands
+
+The extension provides three main commands:
+
+| Command | Description |
+|---------|-------------|
+| **Start Transcription** | Real-time audio transcription with speaker diarization |
+| **Voice Input** | Quick voice-to-text - speak and paste directly to focused app |
+| **Manage Dictionary** | View, add, edit, and delete dictionary entries |
+
 #### Features
 
 - Real-time transcription display with timestamps
@@ -290,7 +300,61 @@ cd raycast-extension
 npm run build
 ```
 
-#### Keyboard Shortcuts
+#### Voice Input
+
+The **Voice Input** command provides quick voice-to-text functionality similar to macOS Dictation or AquaVoice.
+
+**How it works:**
+1. Open Raycast and search for "Voice Input"
+2. Recording starts automatically
+3. Speak your message
+4. Press Enter to type text into the focused app, or use other actions
+
+**Features:**
+- Auto-start recording when opened
+- Real-time audio level visualization
+- Dictionary and phonetic correction applied automatically
+- Multiple output options (type, paste, copy)
+
+**Keyboard Shortcuts:**
+
+| Shortcut | Action |
+|----------|--------|
+| ⏎ Enter | Type text into focused app |
+| ⌘V | Paste text |
+| ⌘C | Copy to clipboard |
+| ⌘R | Reset and restart |
+| Esc | Cancel |
+
+#### Manage Dictionary
+
+The **Manage Dictionary** command provides a GUI for managing word replacement rules.
+
+**Features:**
+- View all dictionary entries with search and filter
+- Add new entries with different rule types
+- Edit existing entries
+- Delete entries with confirmation
+- Open dictionary file in Finder
+
+**Entry Types:**
+
+| Type | Description | Use Case |
+|------|-------------|----------|
+| **Simple** | Always replaced | Proper nouns (ウィスパー → Whisper) |
+| **Replacement** | Regex support | Complex patterns |
+| **Context** | Conditional based on keywords | Homophones (寝具 → SING when near "会社") |
+
+**Keyboard Shortcuts:**
+
+| Shortcut | Action |
+|----------|--------|
+| ⌘N | Add new entry |
+| Enter | Edit selected entry |
+| ⌘⌫ | Delete entry |
+| ⌘C | Copy pattern |
+
+#### Start Transcription Shortcuts
 
 | Shortcut | Action |
 |----------|--------|
