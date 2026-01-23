@@ -253,7 +253,7 @@ When `--gui` is specified, a floating window appears showing:
 
 A native [Raycast](https://raycast.com/) extension for real-time transcription with a beautiful UI.
 
-![Raycast Extension](./docs/images/raycast_extension.gif)
+![raycast_voice.gif](docs/images/raycast_voice.gif)![Raycast Extension](./docs/images/)
 
 #### Commands
 
@@ -264,14 +264,6 @@ The extension provides three main commands:
 | **Start Transcription** | Real-time audio transcription with speaker diarization |
 | **Voice Input** | Quick voice-to-text - speak and paste directly to focused app |
 | **Manage Dictionary** | View, add, edit, and delete dictionary entries |
-
-#### Features
-
-- Real-time transcription display with timestamps
-- Speaker diarization with color-coded indicators (🔵 🟢 🟡 🟣 🔴 🟠)
-- Copy transcription to clipboard with ⌘C
-- Save transcription to file with ⌘⇧S
-- Start/stop recording with ⌘R/⌘S
 
 #### Installation
 
@@ -300,7 +292,52 @@ cd raycast-extension
 npm run build
 ```
 
+#### Start Transcription
+
+![raycast_transctiption.gif](docs/images/raycast_transctiption.gif)![./docs/images/raycast_transcription.gif](RaycastTranscription)
+
+The **Start Transcription** command provides continuous real-time audio transcription with speaker diarization.
+
+**Features:**
+- Real-time transcription display with timestamps
+- Speaker diarization with color-coded indicators (🔵 🟢 🟡 🟣 🔴 🟠)
+- Save transcription to file
+- Audio recording option (WAV format)
+- Multiple audio sources (microphone, system audio, or both)
+
+**How it works:**
+1. Open Raycast and search for "Start Transcription"
+2. Press ⌘R to start recording
+3. Transcription appears in real-time with speaker labels
+4. Press ⌘S to stop, ⌘C to copy, or ⌘⇧S to save to file
+
+**Keyboard Shortcuts:**
+
+| Shortcut | Action |
+|----------|--------|
+| ⌘R | Start Recording |
+| ⌘S | Stop Recording |
+| ⌘C | Copy to Clipboard |
+| ⌘⇧S | Save to File |
+| ⌘⌫ | Clear Transcription |
+
+**Display Format:**
+
+The transcription is displayed with:
+- **Timestamps**: `0:05` format showing when each segment was spoken
+- **Speaker Icons**: 🔵 🟢 🟡 🟣 🔴 🟠 for different speakers
+- **Partial/Final Indicators**: Partial transcriptions shown in italics with "(typing...)"
+
+Example:
+```
+`0:00` 🔵 **話者0**: こんにちは
+`0:02` 🟢 **話者1**: はい、こんにちは
+`0:05` 🔵 **話者0**: *今日の議題は...* (typing...)
+```
+
 #### Voice Input
+
+![raycast_voice.gif](docs/images/raycast_voice.gif)
 
 The **Voice Input** command provides quick voice-to-text functionality similar to macOS Dictation or AquaVoice.
 
@@ -328,6 +365,8 @@ The **Voice Input** command provides quick voice-to-text functionality similar t
 
 #### Manage Dictionary
 
+![raycast_dictionary.png](docs/images/raycast_dictionary.png)
+
 The **Manage Dictionary** command provides a GUI for managing word replacement rules.
 
 **Features:**
@@ -353,30 +392,6 @@ The **Manage Dictionary** command provides a GUI for managing word replacement r
 | Enter | Edit selected entry |
 | ⌘⌫ | Delete entry |
 | ⌘C | Copy pattern |
-
-#### Start Transcription Shortcuts
-
-| Shortcut | Action |
-|----------|--------|
-| ⌘R | Start Recording |
-| ⌘S | Stop Recording |
-| ⌘C | Copy to Clipboard |
-| ⌘⇧S | Save to File |
-| ⌘⌫ | Clear Transcription |
-
-#### Display Format
-
-The transcription is displayed with:
-- **Timestamps**: `0:05` format showing when each segment was spoken
-- **Speaker Icons**: 🔵 🟢 🟡 🟣 🔴 🟠 for different speakers
-- **Partial/Final Indicators**: Partial transcriptions shown in italics with "(typing...)"
-
-Example:
-```
-`0:00` 🔵 **話者0**: こんにちは
-`0:02` 🟢 **話者1**: はい、こんにちは
-`0:05` 🔵 **話者0**: *今日の議題は...* (typing...)
-```
 
 ### Menu Bar App (macOS)
 
