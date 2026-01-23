@@ -11,8 +11,6 @@ import {
   popToRoot,
 } from "@raycast/api";
 import { useState, useEffect, useCallback, useRef } from "react";
-import { exec } from "child_process";
-import { promisify } from "util";
 import {
   getWhisperProcess,
   resetWhisperProcess,
@@ -21,25 +19,6 @@ import {
   WhisperPreferences,
   StartOptions,
 } from "./utils/whisper";
-
-const execAsync = promisify(exec);
-
-// Type text character by character using AppleScript for smooth typing effect
-async function typeText(text: string): Promise<void> {
-  // Escape special characters for AppleScript
-  const escapedText = text
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, "\\n");
-
-  const script = `
-    tell application "System Events"
-      keystroke "${escapedText}"
-    end tell
-  `;
-
-  await execAsync(`osascript -e '${script.replace(/'/g, "'\"'\"'")}'`);
-}
 
 interface VoiceInputState {
   text: string;
@@ -376,30 +355,7 @@ export default function VoiceInput() {
     }, 500);
   }, []);
 
-  // Generate spectrum visualization (horizontal frequency display)
-  const generateSpectrumBar = (spectrum: number[]) => {
-    // 各周波数帯域の高さ（0-5段階）
-    const maxHeight = 5;
-    const heights = spectrum.map((v) => Math.round(v * maxHeight));
-
-    // 横軸に周波数帯域を並べたスペクトラム表示を生成
-    const lines: string[] = [];
-
-    // 上から下へ各行を生成
-    for (let row = maxHeight; row >= 1; row--) {
-      const rowChars = heights.map((h) => (h >= row ? "█" : " "));
-      lines.push(rowChars.join(" "));
-    }
-
-    // 周波数ラベル（Low → High）
-    const labels = "L       H";
-
-    return (
-      "```\n" + lines.join("\n") + "\n" + "─".repeat(15) + "\n" + labels + "\n```"
-    );
-  };
-
-  // Generate audio level bar for visualization (fallback)
+  // Generate audio level bar for visualization
   const generateLevelBar = (level: number) => {
     const barLength = 20;
     const filledLength = Math.round(level * barLength);

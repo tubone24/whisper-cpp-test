@@ -89,7 +89,7 @@ export class WhisperRealtimeProcess extends EventEmitter {
     const projectPath = preferences.whisperRealtimePath;
 
     let args: string[];
-    let useVoiceSingle = opts.useVoiceSingle || false;
+    const useVoiceSingle = opts.useVoiceSingle || false;
 
     if (useVoiceSingle) {
       // Use voice-single command for better accuracy (AquaVoice-style)
@@ -130,17 +130,21 @@ export class WhisperRealtimeProcess extends EventEmitter {
 
       // Processing step (use option override if provided, otherwise use preference)
       const processingStep =
-        opts.processingStep ?? parseInt(preferences.processingStep || "500", 10);
+        opts.processingStep ??
+        parseInt(preferences.processingStep || "500", 10);
       args.push("--step", processingStep.toString());
 
       // Processing length (use option override if provided, otherwise use preference)
       const processingLength =
-        opts.processingLength ?? parseInt(preferences.processingLength || "3000", 10);
+        opts.processingLength ??
+        parseInt(preferences.processingLength || "3000", 10);
       args.push("--length", processingLength.toString());
 
       // VAD (use option override if provided, otherwise use preference)
       const enableVad =
-        opts.enableVad !== undefined ? opts.enableVad : preferences.enableVad !== false;
+        opts.enableVad !== undefined
+          ? opts.enableVad
+          : preferences.enableVad !== false;
       if (enableVad) {
         args.push("--vad");
       } else {
@@ -330,7 +334,7 @@ export class WhisperRealtimeProcess extends EventEmitter {
         this.emit("partial", this.currentPartial);
         break;
 
-      case "final":
+      case "final": {
         const entry: TranscriptionEntry = {
           speaker: event.speaker || "",
           text: event.text || "",
@@ -341,6 +345,7 @@ export class WhisperRealtimeProcess extends EventEmitter {
         this.currentPartial = null;
         this.emit("final", entry);
         break;
+      }
 
       case "status":
         this.emit("status", {
