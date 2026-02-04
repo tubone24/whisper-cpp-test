@@ -62,6 +62,11 @@ export interface StartOptions {
   processingStep?: number; // Processing step (ms)
   processingLength?: number; // Processing window length (ms)
   enableVad?: boolean; // VAD enable override
+  // voice-single用の追加オプション（長文対応）
+  voiceSingleStep?: number; // voice-single: 処理ステップ間隔 (ms)
+  voiceSingleLength?: number; // voice-single: 処理窓の長さ (ms)
+  voiceSingleKeep?: number; // voice-single: コンテキスト保持時間 (ms)
+  voiceSingleMaxTokens?: number; // voice-single: 最大トークン数
 }
 
 export class WhisperRealtimeProcess extends EventEmitter {
@@ -110,6 +115,17 @@ export class WhisperRealtimeProcess extends EventEmitter {
       if (opts.deviceId !== undefined) {
         args.push("--device", opts.deviceId.toString());
       }
+
+      // voice-single用の処理パラメータ（長文対応）
+      const step = opts.voiceSingleStep ?? 500;
+      const length = opts.voiceSingleLength ?? 10000; // デフォルト10秒で長文対応
+      const keep = opts.voiceSingleKeep ?? 500;
+      const maxTokens = opts.voiceSingleMaxTokens ?? 128;
+
+      args.push("--step", step.toString());
+      args.push("--length", length.toString());
+      args.push("--keep", keep.toString());
+      args.push("--max-tokens", maxTokens.toString());
     } else {
       // Use start command with JSON output (for transcription mode)
       args = [

@@ -1288,6 +1288,30 @@ def dictionary_test(text: str, path: Optional[str]):
     default=True,
     help="Use ASR error correction (homophone disambiguation, katakana normalization, etc.)",
 )
+@click.option(
+    "--step", "-s",
+    type=int,
+    default=500,
+    help="Processing step interval in milliseconds (default: 500)",
+)
+@click.option(
+    "--length", "-L",
+    type=int,
+    default=10000,
+    help="Processing window length in milliseconds (default: 10000 for longer texts)",
+)
+@click.option(
+    "--keep", "-k",
+    type=int,
+    default=500,
+    help="Context keep duration in milliseconds (default: 500)",
+)
+@click.option(
+    "--max-tokens", "-t",
+    type=int,
+    default=128,
+    help="Maximum tokens per inference (default: 128 for longer texts)",
+)
 def voice_single(
     model: str,
     language: str,
@@ -1295,6 +1319,10 @@ def voice_single(
     dictionary: bool,
     dictionary_path: Optional[str],
     phonetic: bool,
+    step: int,
+    length: int,
+    keep: int,
+    max_tokens: int,
 ):
     """
     Single-shot voice input mode (for external app integration)
@@ -1318,6 +1346,7 @@ def voice_single(
     logger.info(f"  Language: {language}")
     logger.info(f"  Dictionary: {dictionary}")
     logger.info(f"  PhoneticCorrection: {phonetic}")
+    logger.info(f"  Step: {step}ms, Length: {length}ms, Keep: {keep}ms, MaxTokens: {max_tokens}")
 
     whisper_model = WhisperModel(model)
 
@@ -1330,6 +1359,10 @@ def voice_single(
         use_dictionary=dictionary,
         dictionary_path=Path(dictionary_path) if dictionary_path else None,
         use_phonetic_correction=phonetic,
+        step_ms=step,
+        length_ms=length,
+        keep_ms=keep,
+        max_tokens=max_tokens,
     )
 
     # 終了フラグ

@@ -87,6 +87,11 @@ class VoiceInputConfig:
     # UI設定
     show_realtime: bool = True  # リアルタイム表示
     sound_feedback: bool = True  # 開始/終了音
+    # Streaming処理設定（長い文章の精度向上用）
+    step_ms: int = 500  # 処理ステップ間隔（ms）
+    length_ms: int = 10000  # 処理窓の長さ（ms）- デフォルト10秒で長文対応
+    keep_ms: int = 500  # コンテキスト保持時間（ms）
+    max_tokens: int = 128  # 最大トークン数 - 長文対応のため増加
 
 
 def compute_spectrum(audio: np.ndarray, num_bands: int = 8) -> list[float]:
@@ -363,15 +368,19 @@ class VoiceInputSession:
 
         # Whisperエンジン初期化（Streaming最適化パラメータ）
         logger.debug("Initializing WhisperEngine...")
+        logger.info(f"  step_ms: {self.config.step_ms}")
+        logger.info(f"  length_ms: {self.config.length_ms}")
+        logger.info(f"  keep_ms: {self.config.keep_ms}")
+        logger.info(f"  max_tokens: {self.config.max_tokens}")
         whisper_config = WhisperConfig(
             model=self.config.model,
             language=self.config.language,
-            # Streaming最適化設定
-            step_ms=500,  # 500ms毎に処理
-            length_ms=3000,  # 3秒の窓（レイテンシ削減）
-            keep_ms=200,  # コンテキスト保持
+            # Streaming最適化設定（configから取得）
+            step_ms=self.config.step_ms,
+            length_ms=self.config.length_ms,
+            keep_ms=self.config.keep_ms,
             beam_size=1,  # Greedy search（高速）
-            max_tokens=32,
+            max_tokens=self.config.max_tokens,
             use_flash_attn=True,
             no_timestamps=True,
         )
@@ -441,9 +450,10 @@ class VoiceInputSession:
         """リアルタイム処理ループ - 定期的に部分結果を生成"""
         logger.debug("_process_loop started")
         process_count = 0
+        step_sec = self.config.step_ms / 1000.0  # msをsecに変換
 
         while self._is_recording:
-            time.sleep(0.5)  # 500ms ごとに処理
+            time.sleep(step_sec)  # 設定されたステップ間隔で処理
 
             if not self._audio_buffer:
                 continue

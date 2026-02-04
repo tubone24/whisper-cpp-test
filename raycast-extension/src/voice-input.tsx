@@ -27,6 +27,8 @@ interface VoiceInputState {
   error: string | null;
   audioLevel: number;
   spectrum: number[];
+  isProcessing: boolean; // 文字起こし処理中かどうか
+  hasPartialText: boolean; // partialテキストがあるかどうか
 }
 
 export default function VoiceInput() {
@@ -37,6 +39,8 @@ export default function VoiceInput() {
     error: null,
     audioLevel: 0,
     spectrum: [0, 0, 0, 0, 0, 0, 0, 0],
+    isProcessing: false,
+    hasPartialText: false,
   });
 
   const preferences = getPreferenceValues<WhisperPreferences>();
@@ -77,9 +81,14 @@ export default function VoiceInput() {
             .map((e) => e.text)
             .filter(Boolean)
             .join("");
+          // 最後のentryがpartialかどうかをチェック
+          const lastEntry = entries[entries.length - 1];
+          const hasPartial = lastEntry ? !lastEntry.isFinal : false;
           setState((prev) => ({
             ...prev,
             text: fullText,
+            isProcessing: hasPartial,
+            hasPartialText: hasPartial,
           }));
         });
 
@@ -141,8 +150,13 @@ export default function VoiceInput() {
         });
 
         // Use voice-single command for better accuracy (same as whisper-realtime voice)
+        // 長文対応: window=20秒、maxTokens=128で精度向上
         const startOptions: StartOptions = {
           useVoiceSingle: true, // Use voice-single for AquaVoice-style input
+          voiceSingleStep: 200, // 200ms毎に処理（高速反応）
+          voiceSingleLength: 20000, // 20秒の窓で長文対応
+          voiceSingleKeep: 500, // コンテキスト保持
+          voiceSingleMaxTokens: 128, // 長文対応のためトークン数増加
         };
 
         process.start(startOptions);
@@ -164,6 +178,8 @@ export default function VoiceInput() {
           error: null,
           audioLevel: 0,
           spectrum: [0, 0, 0, 0, 0, 0, 0, 0],
+          isProcessing: false,
+          hasPartialText: false,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -249,6 +265,8 @@ export default function VoiceInput() {
       error: null,
       audioLevel: 0,
       spectrum: [0, 0, 0, 0, 0, 0, 0, 0],
+      isProcessing: false,
+      hasPartialText: false,
     });
   }, []);
 
@@ -337,6 +355,8 @@ export default function VoiceInput() {
       error: null,
       audioLevel: 0,
       spectrum: [0, 0, 0, 0, 0, 0, 0, 0],
+      isProcessing: false,
+      hasPartialText: false,
     });
 
     await showToast({
@@ -385,7 +405,17 @@ export default function VoiceInput() {
       if (state.text) {
         lines.push("---");
         lines.push("");
-        lines.push(`> ${state.text}`);
+        if (state.isProcessing) {
+          // 処理中：テキストの後に処理中インジケーターを表示
+          lines.push(`> ${state.text}`);
+          lines.push("");
+          lines.push("*🔄 文字起こし中...*");
+        } else {
+          // 完了：確定したテキストを表示
+          lines.push(`> ${state.text}`);
+          lines.push("");
+          lines.push("*✅ 文字起こし完了*");
+        }
       } else {
         lines.push("*Speak now...*");
       }
