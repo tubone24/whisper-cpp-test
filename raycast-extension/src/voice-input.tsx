@@ -19,9 +19,10 @@ import {
   WhisperPreferences,
   StartOptions,
 } from "./utils/whisper";
+import { loadDictionary, applyDictionary } from "./utils/dictionary";
 
 interface VoiceInputState {
-  text: string;
+  entries: TranscriptionEntry[]; // 文字起こしエントリ（isFinal情報を保持）
   isRecording: boolean;
   status: string;
   error: string | null;
@@ -33,7 +34,7 @@ interface VoiceInputState {
 
 export default function VoiceInput() {
   const [state, setState] = useState<VoiceInputState>({
-    text: "",
+    entries: [],
     isRecording: false,
     status: "Starting...",
     error: null,
@@ -46,12 +47,8 @@ export default function VoiceInput() {
   const preferences = getPreferenceValues<WhisperPreferences>();
   const hasStarted = useRef(false);
 
-  // Auto-start recording when component mounts
-  useEffect(() => {
-    if (hasStarted.current) return;
-    hasStarted.current = true;
-
-    const startRecording = async () => {
+  // Shared startRecording function
+  const startRecording = useCallback(async () => {
       try {
         if (!preferences.whisperRealtimePath) {
           setState((prev) => ({
@@ -76,17 +73,12 @@ export default function VoiceInput() {
         const process = getWhisperProcess();
 
         process.on("update", (entries: TranscriptionEntry[]) => {
-          // Combine all text entries
-          const fullText = entries
-            .map((e) => e.text)
-            .filter(Boolean)
-            .join("");
           // 最後のentryがpartialかどうかをチェック
           const lastEntry = entries[entries.length - 1];
           const hasPartial = lastEntry ? !lastEntry.isFinal : false;
           setState((prev) => ({
             ...prev,
-            text: fullText,
+            entries: entries,
             isProcessing: hasPartial,
             hasPartialText: hasPartial,
           }));
@@ -150,13 +142,22 @@ export default function VoiceInput() {
         });
 
         // Use voice-single command for better accuracy (same as whisper-realtime voice)
-        // 長文対応: window=20秒、maxTokens=128で精度向上
+        // Two-Pass処理: Partial(100ms/5秒窓/beam=1) + Final(beam=5)
         const startOptions: StartOptions = {
           useVoiceSingle: true, // Use voice-single for AquaVoice-style input
-          voiceSingleStep: 200, // 200ms毎に処理（高速反応）
-          voiceSingleLength: 20000, // 20秒の窓で長文対応
-          voiceSingleKeep: 500, // コンテキスト保持
-          voiceSingleMaxTokens: 128, // 長文対応のためトークン数増加
+          voiceSingleStep: 1000, // 基本ステップ（Two-Pass時は上書きされる）
+          voiceSingleLength: 20000, // 20秒の窓
+          voiceSingleKeep: 20000, // コンテキスト保持（文の途切れ防止）
+          voiceSingleMaxTokens: 256, // 約256文字まで対応（精度向上）
+          // Two-Pass処理（Zoom/Google Meet方式）
+          twoPass: true,
+          partialStep: 10,
+          partialWindow: 20,
+          partialBeam: 1, // greedy search（高速）
+          finalBeam: 8, // beam search（高精度）
+          // 音声前処理こんにちは。交番駐在所からのお知らせ。詐欺語撲滅にご協力ください。ご協力ください。はい
+          noiseReduction: true, // DeepFilterNetノイズ除去（高ノイズ環境向け）
+          vadThreshold: parseFloat(preferences.vadThreshold || "0.5"), // VAD閾値（設定から取得）
         };
 
         process.start(startOptions);
@@ -172,7 +173,7 @@ export default function VoiceInput() {
         });
 
         setState({
-          text: "",
+          entries: [],
           isRecording: true,
           status: "🎤 Listening...",
           error: null,
@@ -193,8 +194,13 @@ export default function VoiceInput() {
           title: "Error in startRecording",
           message: message,
         });
-      }
-    };
+    }
+  }, [preferences.whisperRealtimePath]);
+
+  // Auto-start recording when component mounts
+  useEffect(() => {
+    if (hasStarted.current) return;
+    hasStarted.current = true;
 
     startRecording();
 
@@ -207,7 +213,7 @@ export default function VoiceInput() {
       // Also kill any zombie processes
       killAllWhisperProcesses();
     };
-  }, [preferences.whisperRealtimePath]);
+  }, [startRecording]);
 
   const typeAndClose = useCallback(async () => {
     const process = getWhisperProcess();
@@ -225,6 +231,14 @@ export default function VoiceInput() {
     const textAfterStop = process.getFullText(true);
     if (textAfterStop) {
       finalText = textAfterStop;
+    }
+
+    // Apply dictionary (including hallucination filter)
+    try {
+      const dictionary = await loadDictionary();
+      finalText = applyDictionary(finalText, dictionary);
+    } catch (error) {
+      console.error("Failed to apply dictionary:", error);
     }
 
     if (!finalText.trim()) {
@@ -257,17 +271,11 @@ export default function VoiceInput() {
     resetWhisperProcess();
     await killAllWhisperProcesses();
 
-    // Reset the transcription state
-    setState({
-      text: "",
-      isRecording: false,
-      status: "Ready",
-      error: null,
-      audioLevel: 0,
-      spectrum: [0, 0, 0, 0, 0, 0, 0, 0],
-      isProcessing: false,
-      hasPartialText: false,
-    });
+    // Reset hasStarted so next time voice input opens, it will auto-start
+    hasStarted.current = false;
+
+    // Pop to root to fully reset the component for next use
+    await popToRoot();
   }, []);
 
   const pasteAndClose = useCallback(async () => {
@@ -275,7 +283,15 @@ export default function VoiceInput() {
     process.stop();
 
     // Get final text (excluding partial)
-    const finalText = process.getFullText(false);
+    let finalText = process.getFullText(false);
+
+    // Apply dictionary (including hallucination filter)
+    try {
+      const dictionary = await loadDictionary();
+      finalText = applyDictionary(finalText, dictionary);
+    } catch (error) {
+      console.error("Failed to apply dictionary:", error);
+    }
 
     if (!finalText.trim()) {
       await showToast({
@@ -313,7 +329,15 @@ export default function VoiceInput() {
     const process = getWhisperProcess();
     process.stop();
 
-    const finalText = process.getFullText(false);
+    let finalText = process.getFullText(false);
+
+    // Apply dictionary (including hallucination filter)
+    try {
+      const dictionary = await loadDictionary();
+      finalText = applyDictionary(finalText, dictionary);
+    } catch (error) {
+      console.error("Failed to apply dictionary:", error);
+    }
 
     if (!finalText.trim()) {
       await showToast({
@@ -349,7 +373,7 @@ export default function VoiceInput() {
 
     // Reset state
     setState({
-      text: "",
+      entries: [],
       isRecording: false,
       status: "Resetting...",
       error: null,
@@ -360,20 +384,17 @@ export default function VoiceInput() {
     });
 
     await showToast({
-      style: Toast.Style.Success,
-      title: "Reset complete",
-      message: "Ready to record again",
+      style: Toast.Style.Animated,
+      title: "Resetting...",
+      message: "Restarting recording",
     });
 
-    // Reset hasStarted to allow restarting
-    hasStarted.current = false;
+    // Wait a bit for cleanup to complete
+    await new Promise((resolve) => setTimeout(resolve, 300));
 
-    // Restart recording after a short delay
-    setTimeout(() => {
-      // Trigger re-render to restart
-      setState((prev) => ({ ...prev, status: "Ready" }));
-    }, 500);
-  }, []);
+    // Directly restart recording
+    await startRecording();
+  }, [startRecording]);
 
   // Generate audio level bar for visualization
   const generateLevelBar = (level: number) => {
@@ -382,6 +403,20 @@ export default function VoiceInput() {
     const filled = "█".repeat(filledLength);
     const empty = "░".repeat(barLength - filledLength);
     return `\`${filled}${empty}\``;
+  };
+
+  // Generate formatted text with final parts in bold
+  const generateFormattedText = () => {
+    if (state.entries.length === 0) return "";
+
+    return state.entries
+      .map((entry) => {
+        if (!entry.text) return "";
+        // 確定部分は太字、partial部分は通常テキスト
+        return entry.isFinal ? `**${entry.text}**` : entry.text;
+      })
+      .filter(Boolean)
+      .join("");
   };
 
   // Generate compact markdown for voice input
@@ -402,17 +437,18 @@ export default function VoiceInput() {
       lines.push(generateLevelBar(state.audioLevel));
       lines.push("");
 
-      if (state.text) {
+      const formattedText = generateFormattedText();
+      if (formattedText) {
         lines.push("---");
         lines.push("");
         if (state.isProcessing) {
           // 処理中：テキストの後に処理中インジケーターを表示
-          lines.push(`> ${state.text}`);
+          lines.push(`> ${formattedText}`);
           lines.push("");
           lines.push("*🔄 文字起こし中...*");
         } else {
           // 完了：確定したテキストを表示
-          lines.push(`> ${state.text}`);
+          lines.push(`> ${formattedText}`);
           lines.push("");
           lines.push("*✅ 文字起こし完了*");
         }
@@ -428,9 +464,10 @@ export default function VoiceInput() {
       );
     } else {
       lines.push(`**Status:** ${state.status}`);
-      if (state.text) {
+      const formattedText = generateFormattedText();
+      if (formattedText) {
         lines.push("");
-        lines.push(`> ${state.text}`);
+        lines.push(`> ${formattedText}`);
       }
     }
 

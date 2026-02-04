@@ -27,6 +27,12 @@ macos = [
     "pyobjc-framework-AVFoundation>=10.0; sys_platform == 'darwin'",
     "pyobjc-framework-libdispatch>=10.0; sys_platform == 'darwin'",
 ]
+# Enhanced audio processing (Silero VAD + DeepFilterNet)
+enhanced = [
+    "torch>=2.0.0",
+    "torchaudio>=2.0.0",
+    "deepfilternet>=0.5.0",
+]
 
 [project.scripts]
 whisper-realtime = "src.cli:main"

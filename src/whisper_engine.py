@@ -180,8 +180,19 @@ class WhisperEngine:
             else:
                 self._buffer.clear()
 
-    def transcribe_audio(self, audio: np.ndarray) -> Optional[TranscriptionResult]:
-        """音声データを文字起こし"""
+    def transcribe_audio(
+        self,
+        audio: np.ndarray,
+        beam_size: Optional[int] = None,
+        best_of: Optional[int] = None,
+    ) -> Optional[TranscriptionResult]:
+        """音声データを文字起こし
+
+        Args:
+            audio: 音声データ (16kHz, float32)
+            beam_size: beam searchのサイズ (1=greedy, 5=高精度)
+            best_of: 候補数 (1=高速, 5=高精度)
+        """
         if len(audio) == 0:
             return None
 
@@ -204,6 +215,12 @@ class WhisperEngine:
                 "-nt",  # no timestamps
                 "-np",  # no prints (progress等を抑制)
             ]
+
+            # beam_size と best_of を設定（指定がなければconfigのデフォルト）
+            bs = beam_size if beam_size is not None else self.config.beam_size
+            bo = best_of if best_of is not None else bs  # best_ofはbeam_sizeと同じがデフォルト
+            cmd.extend(["-bs", str(bs)])
+            cmd.extend(["-bo", str(bo)])
 
             if self.config.translate:
                 cmd.append("--translate")

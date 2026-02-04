@@ -21,6 +21,7 @@ import {
   generateRecordingFilename,
   StartOptions,
 } from "./utils/whisper";
+import { loadDictionary, applyDictionary } from "./utils/dictionary";
 
 interface TranscriptionState {
   entries: TranscriptionEntry[];
@@ -248,6 +249,10 @@ export default function StartTranscription() {
       const startOptions: StartOptions = {
         recordingPath: recordingPath || undefined,
         audioSource: state.audioSource,
+        enableVad: preferences.enableVad !== false,
+        // Processing parameters from preferences
+        processingStep: parseInt(preferences.processingStep || "500", 10),
+        processingLength: parseInt(preferences.processingLength || "3000", 10),
       };
       process.start(startOptions);
 
@@ -300,7 +305,7 @@ export default function StartTranscription() {
 
   const copyToClipboard = useCallback(async () => {
     const process = getWhisperProcess();
-    const text = process.getFullText(false); // Exclude partial
+    let text = process.getFullText(false); // Exclude partial
 
     if (!text) {
       await showToast({
@@ -311,13 +316,21 @@ export default function StartTranscription() {
       return;
     }
 
+    // Apply dictionary (including hallucination filter)
+    try {
+      const dictionary = await loadDictionary();
+      text = applyDictionary(text, dictionary);
+    } catch (error) {
+      console.error("Failed to apply dictionary:", error);
+    }
+
     await Clipboard.copy(text);
     await showHUD("Copied to clipboard");
   }, []);
 
   const saveToFile = useCallback(async () => {
     const process = getWhisperProcess();
-    const text = process.getFullText(false);
+    let text = process.getFullText(false);
 
     if (!text) {
       await showToast({
@@ -326,6 +339,14 @@ export default function StartTranscription() {
         message: "No transcription available",
       });
       return;
+    }
+
+    // Apply dictionary (including hallucination filter)
+    try {
+      const dictionary = await loadDictionary();
+      text = applyDictionary(text, dictionary);
+    } catch (error) {
+      console.error("Failed to apply dictionary:", error);
     }
 
     const outputDir =

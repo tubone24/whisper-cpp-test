@@ -25,7 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger('voice_input')
 
-from .audio_capture import AudioCapture, AudioConfig, AudioSource, VADFilter
+from .audio_capture import AudioCapture, AudioConfig, AudioSource, VADFilter, AudioPreprocessor
 from .dictionary import Dictionary, load_or_create_dictionary
 from .phonetic_corrector import PhoneticCorrector, PhoneticCorrectorConfig
 from .whisper_engine import TranscriptionResult, WhisperConfig, WhisperEngine, WhisperModel
@@ -92,6 +92,16 @@ class VoiceInputConfig:
     length_ms: int = 10000  # 処理窓の長さ（ms）- デフォルト10秒で長文対応
     keep_ms: int = 500  # コンテキスト保持時間（ms）
     max_tokens: int = 128  # 最大トークン数 - 長文対応のため増加
+    # Two-Pass処理設定（Zoom/Google Meet方式）
+    two_pass: bool = True  # 2段階処理を有効化
+    partial_step_ms: int = 100  # Partial用：処理間隔（100ms固定）
+    partial_window_sec: float = 5.0  # Partial用：最新N秒のみ処理
+    partial_beam_size: int = 1  # Partial用：greedy search（高速）
+    final_beam_size: int = 5  # Final用：beam search（高精度）
+    # 音声前処理設定
+    use_silero_vad: bool = True  # Silero VADを使用（高精度）
+    vad_threshold: float = 0.5  # VAD検出閾値（0.0-1.0）
+    use_noise_reduction: bool = False  # DeepFilterNetノイズ除去（高ノイズ環境向け）
 
 
 def compute_spectrum(audio: np.ndarray, num_bands: int = 8) -> list[float]:
@@ -341,6 +351,11 @@ class VoiceInputSession:
         self._phonetic_corrector: Optional[PhoneticCorrector] = None
         self._process_thread: Optional[threading.Thread] = None
         self._last_processed_samples = 0
+        self._preprocessor: Optional[AudioPreprocessor] = None
+        # タイムスタンプベースの確定処理
+        self._confirmed_samples = 0  # 確定済み音声サンプル数
+        self._confirmed_text = ""  # 確定済みテキスト
+        self._confirm_delay_sec = 3.0  # N秒前までを確定対象とする
 
         # 辞書読み込み
         if config.use_dictionary:
@@ -349,6 +364,15 @@ class VoiceInputSession:
         # 音声認識誤り訂正機能初期化
         if config.use_phonetic_correction:
             self._phonetic_corrector = PhoneticCorrector()
+
+        # 音声前処理（Silero VAD + DeepFilterNet）
+        if config.use_vad or config.use_noise_reduction:
+            self._preprocessor = AudioPreprocessor(
+                sample_rate=16000,
+                use_vad=config.use_vad and config.use_silero_vad,
+                use_noise_reduction=config.use_noise_reduction,
+                vad_threshold=config.vad_threshold,
+            )
 
     def start(self):
         """録音開始"""
@@ -409,15 +433,18 @@ class VoiceInputSession:
     def _record_loop(self):
         """録音ループ - 音声をバッファに蓄積"""
         logger.debug("_record_loop started")
-        vad = VADFilter() if self.config.use_vad else None
         chunk_count = 0
+
+        # AudioPreprocessorを使用（Silero VAD + DeepFilterNet）
+        # セッション初期化時に作成済みのpreprocessorを使用
+        preprocessor = self._preprocessor
 
         try:
             with self._capture:
                 while self._is_recording:
                     audio = self._capture.get_audio(timeout=0.1)
                     if audio is not None and len(audio) > 0:
-                        # 音声レベルを計算してコールバック（VAD前の生データで計算）
+                        # 音声レベルを計算してコールバック（前処理前の生データで計算）
                         if self.on_level:
                             rms = float(np.sqrt(np.mean(audio ** 2)))
                             # 0-1の範囲に正規化（一般的なマイク入力の場合）
@@ -429,10 +456,11 @@ class VoiceInputSession:
                             spectrum = compute_spectrum(audio, num_bands=8)
                             self.on_spectrum(spectrum)
 
-                        # VADフィルタリング（完全にスキップせず、音声ありの部分のみ記録）
-                        if vad and vad.enabled:
-                            if vad.is_speech(audio):
-                                self._audio_buffer.append(audio)
+                        # 音声前処理（VAD + ノイズ除去）
+                        if preprocessor:
+                            processed = preprocessor.process(audio)
+                            if processed is not None:
+                                self._audio_buffer.append(processed)
                                 chunk_count += 1
                         else:
                             self._audio_buffer.append(audio)
@@ -447,13 +475,26 @@ class VoiceInputSession:
         logger.debug(f"_record_loop ended, total chunks: {chunk_count}")
 
     def _process_loop(self):
-        """リアルタイム処理ループ - 定期的に部分結果を生成"""
+        """リアルタイム処理ループ - タイムスタンプベースの確定処理"""
         logger.debug("_process_loop started")
         process_count = 0
-        step_sec = self.config.step_ms / 1000.0  # msをsecに変換
+
+        # Two-Pass有効時は高速な100ms間隔、無効時は従来のstep_ms
+        if self.config.two_pass:
+            step_sec = self.config.partial_step_ms / 1000.0
+            partial_beam = self.config.partial_beam_size  # PARTIAL用: greedy (beam=1)
+            final_beam = self.config.final_beam_size  # FINAL用: beam search (beam=5)
+            confirm_delay_samples = int(self._confirm_delay_sec * 16000)  # 確定遅延サンプル数
+            logger.info(f"[Two-Pass] step={self.config.partial_step_ms}ms, partial_beam={partial_beam}, final_beam={final_beam}, delay={self._confirm_delay_sec}s")
+        else:
+            step_sec = self.config.step_ms / 1000.0
+            partial_beam = None
+            final_beam = None
+            confirm_delay_samples = 0
+            logger.info(f"[Single-Pass] step={self.config.step_ms}ms")
 
         while self._is_recording:
-            time.sleep(step_sec)  # 設定されたステップ間隔で処理
+            time.sleep(step_sec)
 
             if not self._audio_buffer:
                 continue
@@ -463,47 +504,125 @@ class VoiceInputSession:
             current_samples = len(current_audio)
 
             # 新しい音声がある場合のみ処理
-            if current_samples > self._last_processed_samples + 8000:  # 0.5秒以上の新規音声
+            if current_samples > self._last_processed_samples + 1600:  # 0.1秒以上の新規音声
                 try:
                     process_count += 1
-                    logger.debug(f"[Process #{process_count}] Input: {current_samples} samples ({current_samples/16000:.1f}s)")
 
-                    # バッファ全体を文字起こし（1センテンスとして）
-                    t0 = time.time()
-                    result = self._engine.transcribe_audio(current_audio)
-                    whisper_time = time.time() - t0
-                    logger.debug(f"[Process #{process_count}] Whisper: {whisper_time:.2f}s")
+                    if self.config.two_pass:
+                        # === Two-Pass処理 ===
+                        # 確定対象: N秒前までの音声（高精度処理）
+                        confirm_boundary = current_samples - confirm_delay_samples
 
-                    if result and result.text.strip():
-                        text = result.text.strip()
-                        logger.info(f"[PARTIAL #{process_count}] 🎤 Whisper Raw: '{text}'")
+                        # 新しく確定可能な部分があるか
+                        if confirm_boundary > self._confirmed_samples and confirm_boundary > 0:
+                            confirm_audio = current_audio[:confirm_boundary]
+                            logger.debug(f"[FINAL #{process_count}] Processing {len(confirm_audio)/16000:.1f}s for confirmation")
 
-                        # 辞書適用
-                        if self._dictionary:
-                            before_dict = text
-                            text = self._dictionary.apply(text)
-                            if text != before_dict:
-                                logger.info(f"[PARTIAL #{process_count}] 📖 Dictionary: '{before_dict}' → '{text}'")
+                            # 高精度処理（beam_size=5）
+                            t0 = time.time()
+                            result = self._engine.transcribe_audio(confirm_audio, beam_size=final_beam)
+                            whisper_time = time.time() - t0
 
-                        # 音声認識誤り訂正
-                        if self._phonetic_corrector:
-                            before_corr = text
-                            result = self._phonetic_corrector.correct(text)
-                            text = result.corrected_text
-                            if text != before_corr:
-                                logger.info(f"[PARTIAL #{process_count}] 🔊 Phonetic: '{before_corr}' → '{text}'")
+                            if result and result.text.strip():
+                                text = self._apply_corrections(result.text.strip(), process_count, "FINAL")
+                                # 新しく確定した部分を出力
+                                if text != self._confirmed_text:
+                                    new_confirmed = text[len(self._confirmed_text):] if text.startswith(self._confirmed_text) else text
+                                    if new_confirmed or text != self._confirmed_text:
+                                        self._confirmed_text = text
+                                        self._confirmed_samples = confirm_boundary
+                                        logger.info(f"[FINAL #{process_count}] ✅ '{text}' ({whisper_time:.2f}s)")
+                                        if self.on_final:
+                                            self.on_final(text)
 
-                        self._partial_text = text
-                        if self.on_partial:
-                            self.on_partial(text)
+                        # 暫定部分: 確定境界以降の音声のみを処理（重複防止）
+                        if self._confirmed_samples > 0:
+                            partial_audio = current_audio[self._confirmed_samples:]
+                        else:
+                            partial_audio = current_audio
+
+                        if len(partial_audio) > 1600:  # 0.1秒以上の音声がある場合
+                            logger.debug(f"[PARTIAL #{process_count}] Processing {len(partial_audio)/16000:.1f}s (after confirmed)")
+                            t0 = time.time()
+                            result = self._engine.transcribe_audio(partial_audio, beam_size=partial_beam)
+                            whisper_time = time.time() - t0
+
+                            if result and result.text.strip():
+                                text = self._apply_corrections(result.text.strip(), process_count, "PARTIAL")
+                                self._partial_text = text
+                                logger.info(f"[PARTIAL #{process_count}] 🎤 '{text}' ({whisper_time:.2f}s)")
+                                if self.on_partial:
+                                    self.on_partial(text)
+                            else:
+                                # 暫定テキストがない場合は空を出力
+                                if self.on_partial:
+                                    self.on_partial("")
+
+                    else:
+                        # === Single-Pass処理 ===
+                        t0 = time.time()
+                        result = self._engine.transcribe_audio(current_audio, beam_size=partial_beam)
+                        whisper_time = time.time() - t0
+
+                        if result and result.text.strip():
+                            text = self._apply_corrections(result.text.strip(), process_count, "PARTIAL")
+                            self._partial_text = text
+                            logger.info(f"[PARTIAL #{process_count}] 🎤 '{text}' ({whisper_time:.2f}s)")
+                            if self.on_partial:
+                                self.on_partial(text)
+
                     self._last_processed_samples = current_samples
                 except Exception as e:
                     logger.error(f"Processing error: {e}")
 
         logger.debug(f"_process_loop ended, total processes: {process_count}")
 
+    def _apply_corrections(self, text: str, process_count: int, prefix: str) -> str:
+        """辞書と音声認識誤り訂正を適用"""
+        # 辞書適用
+        if self._dictionary:
+            before_dict = text
+            text = self._dictionary.apply(text)
+            if text != before_dict:
+                logger.debug(f"[{prefix} #{process_count}] 📖 Dictionary: '{before_dict}' → '{text}'")
+
+        # 音声認識誤り訂正
+        if self._phonetic_corrector:
+            before_corr = text
+            result = self._phonetic_corrector.correct(text)
+            text = result.corrected_text
+            if text != before_corr:
+                logger.debug(f"[{prefix} #{process_count}] 🔊 Phonetic: '{before_corr}' → '{text}'")
+
+        return text
+
+    def _find_confirm_position(self, text: str) -> int:
+        """確定可能な位置を見つける（句読点や助詞の後）"""
+        # 日本語の句読点・区切り文字
+        delimiters = ['。', '、', '？', '！', '．', '，', '?', '!', '.', ',', '　', ' ']
+        # 日本語の助詞（文節の区切りになりやすい）
+        particles = ['は', 'が', 'を', 'に', 'で', 'と', 'の', 'へ', 'から', 'まで', 'より', 'って', 'ね', 'よ', 'さ']
+
+        best_pos = 0
+
+        # 句読点を優先的に探す
+        for i, char in enumerate(text):
+            if char in delimiters:
+                best_pos = i + 1
+
+        # 句読点がなければ、助詞の後を探す（最低5文字以上）
+        if best_pos == 0 and len(text) >= 5:
+            for particle in particles:
+                pos = text.rfind(particle)
+                if pos > 3:  # 最低3文字は確保
+                    candidate = pos + len(particle)
+                    if candidate > best_pos and candidate < len(text) - 2:  # 末尾2文字は残す
+                        best_pos = candidate
+
+        return best_pos
+
     def stop(self) -> str:
-        """録音停止して最終テキストを返す"""
+        """録音停止して最終テキストを返す（Two-Pass: 2nd Pass）"""
         if not self._is_recording:
             return ""
 
@@ -518,6 +637,14 @@ class VoiceInputSession:
             self._process_thread.join(timeout=1.0)
         logger.debug("Threads finished")
 
+        # Two-Pass有効時は高精度なbeam searchで再推論
+        if self.config.two_pass:
+            beam_size = self.config.final_beam_size
+            logger.info(f"[Two-Pass] 2nd Pass: beam_size={beam_size} (高精度)")
+        else:
+            beam_size = None
+            logger.info("[Single-Pass] Final transcription")
+
         # 最終処理：バッファ全体を一括で文字起こし
         final_text = ""
         if self._audio_buffer:
@@ -528,8 +655,9 @@ class VoiceInputSession:
             if len(full_audio) > 1600:  # 0.1秒以上の音声がある場合
                 try:
                     t0 = time.time()
-                    result = self._engine.transcribe_audio(full_audio)
-                    logger.info(f"[FINAL] ⏱️ Whisper処理時間: {time.time()-t0:.2f}s")
+                    result = self._engine.transcribe_audio(full_audio, beam_size=beam_size)
+                    whisper_time = time.time() - t0
+                    logger.info(f"[FINAL] ⏱️ Whisper処理時間: {whisper_time:.2f}s (beam_size={beam_size})")
                     if result and result.text.strip():
                         final_text = result.text.strip()
                         logger.info(f"[FINAL] 🎤 Whisper Raw: '{final_text}'")

@@ -167,6 +167,40 @@
       "required": false,
       "default": true,
       "label": "Enable VAD"
+    },
+    {
+      "name": "vadThreshold",
+      "title": "VAD Threshold",
+      "description": "Voice detection sensitivity (0.0-1.0). Higher = stricter, reduces hallucinations like 'ご視聴ありがとうございます'. Default: 0.5, Recommended: 0.6-0.7",
+      "type": "dropdown",
+      "required": false,
+      "default": "0.5",
+      "data": [
+        {
+          "title": "0.3 (Sensitive)",
+          "value": "0.3"
+        },
+        {
+          "title": "0.4",
+          "value": "0.4"
+        },
+        {
+          "title": "0.5 (Default)",
+          "value": "0.5"
+        },
+        {
+          "title": "0.6 (Recommended)",
+          "value": "0.6"
+        },
+        {
+          "title": "0.7 (Strict)",
+          "value": "0.7"
+        },
+        {
+          "title": "0.8 (Very Strict)",
+          "value": "0.8"
+        }
+      ]
     }
   ],
   "dependencies": {
