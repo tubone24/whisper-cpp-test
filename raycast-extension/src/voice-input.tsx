@@ -415,7 +415,16 @@ export default function VoiceInput() {
       .map((entry) => {
         if (!entry.text) return "";
         // 確定部分は太字、partial部分は通常テキスト
-        return entry.isFinal ? `**${entry.text}**` : entry.text;
+        // CommonMarkではCJK文字が**に直接隣接すると太字にならない
+        // 対策: 句読点・一定文字数で分割し、各セグメントをZWSP+**で囲む
+        if (!entry.isFinal) return entry.text;
+        // 句読点で分割、さらに句読点がないセグメントは30文字ごとに分割
+        const segments = entry.text
+          .split(/(?<=[。、！？!?,.\n])/)
+          .flatMap((seg) =>
+            seg.length > 30 ? seg.match(/.{1,30}/g) ?? [seg] : [seg],
+          );
+        return segments.map((seg) => `\u200B**${seg}**\u200B`).join("");
       })
       .filter(Boolean)
       .join("");
@@ -512,7 +521,6 @@ export default function VoiceInput() {
               title="Cancel"
               icon={Icon.XMarkCircle}
               onAction={cancelAndClose}
-              shortcut={{ modifiers: [], key: "escape" }}
             />
           </ActionPanel.Section>
         </ActionPanel>
