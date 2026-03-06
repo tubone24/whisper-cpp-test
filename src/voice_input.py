@@ -25,7 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger('voice_input')
 
-from .audio_capture import AudioCapture, AudioConfig, AudioSource, VADFilter
+from .audio_capture import AudioCapture, AudioConfig, AudioSource, VADFilter, AudioPreprocessor
 from .dictionary import Dictionary, load_or_create_dictionary
 from .phonetic_corrector import PhoneticCorrector, PhoneticCorrectorConfig
 from .whisper_engine import TranscriptionResult, WhisperConfig, WhisperEngine, WhisperModel
@@ -87,6 +87,24 @@ class VoiceInputConfig:
     # UI設定
     show_realtime: bool = True  # リアルタイム表示
     sound_feedback: bool = True  # 開始/終了音
+    # Streaming処理設定（長い文章の精度向上用）
+    step_ms: int = 500  # 処理ステップ間隔（ms）
+    length_ms: int = 10000  # 処理窓の長さ（ms）- デフォルト10秒で長文対応
+    keep_ms: int = 500  # コンテキスト保持時間（ms）
+    max_tokens: int = 128  # 最大トークン数 - 長文対応のため増加
+    # Two-Pass処理設定（Zoom/Google Meet方式）
+    two_pass: bool = True  # 2段階処理を有効化
+    partial_step_ms: int = 100  # Partial用：処理間隔（100ms固定）
+    partial_window_sec: float = 5.0  # Partial用：最新N秒のみ処理
+    partial_beam_size: int = 1  # Partial用：greedy search（高速）
+    final_beam_size: int = 5  # Final用：beam search（高精度）
+    # 音声前処理設定
+    use_silero_vad: bool = True  # Silero VADを使用（高精度）
+    vad_threshold: float = 0.5  # VAD検出閾値（0.0-1.0）
+    use_noise_reduction: bool = False  # DeepFilterNetノイズ除去（高ノイズ環境向け）
+    # Utterance検出設定（発話単位での確定）
+    utterance_silence_sec: float = 0.8  # 発話終了とみなす無音時間（秒）
+    min_utterance_sec: float = 0.3  # 最小発話時間（秒）- これ以下は無視
 
 
 def compute_spectrum(audio: np.ndarray, num_bands: int = 8) -> list[float]:
@@ -336,6 +354,15 @@ class VoiceInputSession:
         self._phonetic_corrector: Optional[PhoneticCorrector] = None
         self._process_thread: Optional[threading.Thread] = None
         self._last_processed_samples = 0
+        self._preprocessor: Optional[AudioPreprocessor] = None
+        # Utterance（発話）ベースの確定処理
+        self._confirmed_samples = 0  # 確定済み音声サンプル数
+        self._confirmed_text = ""  # 確定済みテキスト
+        self._utterance_start_samples = 0  # 現在のutteranceの開始位置
+        self._is_speaking = False  # 現在発話中かどうか
+        self._silence_start_time: Optional[float] = None  # 無音開始時刻
+        self._last_vad_speech = False  # 前回のVAD結果
+        self._last_audio_chunk_time: Optional[float] = None  # 最後に音声チャンクが追加された時刻
 
         # 辞書読み込み
         if config.use_dictionary:
@@ -344,6 +371,18 @@ class VoiceInputSession:
         # 音声認識誤り訂正機能初期化
         if config.use_phonetic_correction:
             self._phonetic_corrector = PhoneticCorrector()
+
+        # 音声前処理（Silero VAD + DeepFilterNet）
+        if config.use_vad or config.use_noise_reduction:
+            self._preprocessor = AudioPreprocessor(
+                sample_rate=16000,
+                use_vad=config.use_vad and config.use_silero_vad,
+                use_noise_reduction=config.use_noise_reduction,
+                vad_threshold=config.vad_threshold,
+            )
+            # VAD状態をリセット（新しいセッション用）
+            if self._preprocessor.vad:
+                self._preprocessor.vad.reset_states()
 
     def start(self):
         """録音開始"""
@@ -356,6 +395,11 @@ class VoiceInputSession:
         logger.info(f"  Dictionary: {self.config.use_dictionary}")
         logger.info(f"  PhoneticCorrection: {self.config.use_phonetic_correction}")
 
+        # VAD状態をリセット（新しいセッション開始前）
+        if self._preprocessor and self._preprocessor.vad:
+            self._preprocessor.vad.reset_states()
+            logger.debug("VAD states reset")
+
         self._is_recording = True
         self._audio_buffer = []
         self._partial_text = ""
@@ -363,15 +407,19 @@ class VoiceInputSession:
 
         # Whisperエンジン初期化（Streaming最適化パラメータ）
         logger.debug("Initializing WhisperEngine...")
+        logger.info(f"  step_ms: {self.config.step_ms}")
+        logger.info(f"  length_ms: {self.config.length_ms}")
+        logger.info(f"  keep_ms: {self.config.keep_ms}")
+        logger.info(f"  max_tokens: {self.config.max_tokens}")
         whisper_config = WhisperConfig(
             model=self.config.model,
             language=self.config.language,
-            # Streaming最適化設定
-            step_ms=500,  # 500ms毎に処理
-            length_ms=3000,  # 3秒の窓（レイテンシ削減）
-            keep_ms=200,  # コンテキスト保持
+            # Streaming最適化設定（configから取得）
+            step_ms=self.config.step_ms,
+            length_ms=self.config.length_ms,
+            keep_ms=self.config.keep_ms,
             beam_size=1,  # Greedy search（高速）
-            max_tokens=32,
+            max_tokens=self.config.max_tokens,
             use_flash_attn=True,
             no_timestamps=True,
         )
@@ -400,15 +448,18 @@ class VoiceInputSession:
     def _record_loop(self):
         """録音ループ - 音声をバッファに蓄積"""
         logger.debug("_record_loop started")
-        vad = VADFilter() if self.config.use_vad else None
         chunk_count = 0
+
+        # AudioPreprocessorを使用（Silero VAD + DeepFilterNet）
+        # セッション初期化時に作成済みのpreprocessorを使用
+        preprocessor = self._preprocessor
 
         try:
             with self._capture:
                 while self._is_recording:
                     audio = self._capture.get_audio(timeout=0.1)
                     if audio is not None and len(audio) > 0:
-                        # 音声レベルを計算してコールバック（VAD前の生データで計算）
+                        # 音声レベルを計算してコールバック（前処理前の生データで計算）
                         if self.on_level:
                             rms = float(np.sqrt(np.mean(audio ** 2)))
                             # 0-1の範囲に正規化（一般的なマイク入力の場合）
@@ -420,13 +471,24 @@ class VoiceInputSession:
                             spectrum = compute_spectrum(audio, num_bands=8)
                             self.on_spectrum(spectrum)
 
-                        # VADフィルタリング（完全にスキップせず、音声ありの部分のみ記録）
-                        if vad and vad.enabled:
-                            if vad.is_speech(audio):
+                        # 音声前処理（VAD + ノイズ除去）
+                        try:
+                            if preprocessor:
+                                processed = preprocessor.process(audio)
+                                if processed is not None:
+                                    self._audio_buffer.append(processed)
+                                    self._last_audio_chunk_time = time.time()  # 音声追加時刻を記録
+                                    chunk_count += 1
+                                # VADでフィルタされた場合は時刻を更新しない（無音検出用）
+                            else:
                                 self._audio_buffer.append(audio)
+                                self._last_audio_chunk_time = time.time()
                                 chunk_count += 1
-                        else:
+                        except Exception as proc_err:
+                            # 前処理エラーは警告を出して生データを使用
+                            logger.warning(f"Preprocessing error: {proc_err}, using raw audio")
                             self._audio_buffer.append(audio)
+                            self._last_audio_chunk_time = time.time()
                             chunk_count += 1
 
                         if chunk_count % 10 == 0:
@@ -434,66 +496,235 @@ class VoiceInputSession:
                             logger.debug(f"Audio: {chunk_count} chunks, {total_samples} samples ({total_samples/16000:.1f}s)")
         except Exception as e:
             logger.error(f"Recording error: {e}")
+            import traceback
+            traceback.print_exc()
 
         logger.debug(f"_record_loop ended, total chunks: {chunk_count}")
 
     def _process_loop(self):
-        """リアルタイム処理ループ - 定期的に部分結果を生成"""
+        """リアルタイム処理ループ - Utterance（発話）ベースの確定処理"""
         logger.debug("_process_loop started")
         process_count = 0
 
-        while self._is_recording:
-            time.sleep(0.5)  # 500ms ごとに処理
+        # Two-Pass有効時は高速な100ms間隔、無効時は従来のstep_ms
+        if self.config.two_pass:
+            step_sec = self.config.partial_step_ms / 1000.0
+            partial_beam = self.config.partial_beam_size  # PARTIAL用: greedy (beam=1)
+            final_beam = self.config.final_beam_size  # FINAL用: beam search (beam=5)
+            logger.info(f"[Two-Pass Utterance] step={self.config.partial_step_ms}ms, partial_beam={partial_beam}, final_beam={final_beam}")
+            logger.info(f"[Two-Pass Utterance] silence_threshold={self.config.utterance_silence_sec}s, min_utterance={self.config.min_utterance_sec}s")
+        else:
+            step_sec = self.config.step_ms / 1000.0
+            partial_beam = None
+            final_beam = None
+            logger.info(f"[Single-Pass] step={self.config.step_ms}ms")
 
+        # Utterance検出用の設定
+        silence_threshold_sec = self.config.utterance_silence_sec
+        min_utterance_samples = int(self.config.min_utterance_sec * 16000)
+
+        while self._is_recording:
+            time.sleep(step_sec)
+
+            current_time = time.time()
+            process_count += 1
+
+            # バッファが空の場合
             if not self._audio_buffer:
+                # 発話中なら無音として扱う
+                if self._is_speaking and self._last_audio_chunk_time is not None:
+                    time_since_last_audio = current_time - self._last_audio_chunk_time
+                    if time_since_last_audio >= silence_threshold_sec:
+                        logger.debug(f"[SILENCE #{process_count}] No audio for {time_since_last_audio:.1f}s, triggering FINAL")
+                        # 発話終了処理（バッファが空なのでスキップ）
+                        self._is_speaking = False
+                        self._silence_start_time = None
+                        self._partial_text = ""
                 continue
 
             # 現在のバッファ全体を結合
             current_audio = np.concatenate(self._audio_buffer)
             current_samples = len(current_audio)
 
-            # 新しい音声がある場合のみ処理
-            if current_samples > self._last_processed_samples + 8000:  # 0.5秒以上の新規音声
+            # 新しい音声があるかチェック
+            has_new_audio = current_samples > self._last_processed_samples + 1600  # 0.1秒以上の新規音声
+
+            # 無音検出（VADでフィルタされて新しい音声がない場合）
+            if not has_new_audio and self._is_speaking:
+                if self._last_audio_chunk_time is not None:
+                    time_since_last_audio = current_time - self._last_audio_chunk_time
+                    logger.debug(f"[SILENCE #{process_count}] No new audio, time_since_last={time_since_last_audio:.2f}s, threshold={silence_threshold_sec}s")
+
+                    # 無音が閾値を超えたらFINAL処理
+                    if time_since_last_audio >= silence_threshold_sec:
+                        logger.info(f"[FINAL #{process_count}] 🎯 Silence detected for {time_since_last_audio:.1f}s")
+
+                        # Utteranceの音声範囲を特定
+                        utterance_duration_samples = current_samples - self._utterance_start_samples
+
+                        if utterance_duration_samples >= min_utterance_samples:
+                            # Utteranceを高精度処理（beam search）
+                            utterance_audio = current_audio[self._utterance_start_samples:]
+                            logger.info(f"[FINAL #{process_count}] Processing utterance: {len(utterance_audio)/16000:.1f}s")
+
+                            t0 = time.time()
+                            # 確定テキストをコンテキストとして渡す（精度向上）
+                            prompt = self._confirmed_text if self._confirmed_text else None
+                            result = self._engine.transcribe_audio(utterance_audio, beam_size=final_beam, initial_prompt=prompt)
+                            whisper_time = time.time() - t0
+
+                            if result and result.text.strip():
+                                text = self._apply_corrections(result.text.strip(), process_count, "FINAL")
+                                # 確定テキストに追加
+                                if self._confirmed_text:
+                                    self._confirmed_text += text
+                                else:
+                                    self._confirmed_text = text
+                                logger.info(f"[FINAL #{process_count}] ✅ '{text}' ({whisper_time:.2f}s)")
+                                if self.on_final:
+                                    self.on_final(self._confirmed_text)
+
+                            # 確定済みサンプル数を更新
+                            self._confirmed_samples = current_samples
+                        else:
+                            logger.debug(f"[FINAL #{process_count}] ⏭️ Too short ({utterance_duration_samples/16000:.2f}s), skipping")
+
+                        # Utterance状態をリセット
+                        self._is_speaking = False
+                        self._silence_start_time = None
+                        self._partial_text = ""
+
+                continue
+
+            # 新しい音声がある場合の処理
+            if has_new_audio:
                 try:
-                    process_count += 1
-                    logger.debug(f"[Process #{process_count}] Input: {current_samples} samples ({current_samples/16000:.1f}s)")
+                    # VADで音声区間を検出（最新の音声チャンクをチェック）
+                    new_audio = current_audio[self._last_processed_samples:]
+                    is_speech = self._detect_speech(new_audio)
+                    logger.debug(f"[VAD #{process_count}] is_speech={is_speech}, is_speaking={self._is_speaking}, new_audio_len={len(new_audio)}")
 
-                    # バッファ全体を文字起こし（1センテンスとして）
-                    t0 = time.time()
-                    result = self._engine.transcribe_audio(current_audio)
-                    whisper_time = time.time() - t0
-                    logger.debug(f"[Process #{process_count}] Whisper: {whisper_time:.2f}s")
+                    if self.config.two_pass:
+                        # === Utterance ベースの Two-Pass 処理 ===
 
-                    if result and result.text.strip():
-                        text = result.text.strip()
-                        logger.info(f"[PARTIAL #{process_count}] 🎤 Whisper Raw: '{text}'")
+                        # 発話開始検出
+                        if is_speech and not self._is_speaking:
+                            self._is_speaking = True
+                            self._utterance_start_samples = self._confirmed_samples
+                            self._silence_start_time = None
+                            logger.debug(f"[UTTERANCE #{process_count}] 🎤 Speech started at {self._utterance_start_samples/16000:.1f}s")
 
-                        # 辞書適用
-                        if self._dictionary:
-                            before_dict = text
-                            text = self._dictionary.apply(text)
-                            if text != before_dict:
-                                logger.info(f"[PARTIAL #{process_count}] 📖 Dictionary: '{before_dict}' → '{text}'")
+                        # 暫定部分の処理（確定済み以降の音声）- 発話中のみ
+                        if self._is_speaking:
+                            partial_audio = current_audio[self._confirmed_samples:]
+                            if len(partial_audio) > 1600:  # 0.1秒以上の音声
+                                logger.debug(f"[PARTIAL #{process_count}] Processing {len(partial_audio)/16000:.1f}s")
+                                t0 = time.time()
+                                # 確定テキストをコンテキストとして渡す（精度向上）
+                                prompt = self._confirmed_text if self._confirmed_text else None
+                                result = self._engine.transcribe_audio(partial_audio, beam_size=partial_beam, initial_prompt=prompt)
+                                whisper_time = time.time() - t0
 
-                        # 音声認識誤り訂正
-                        if self._phonetic_corrector:
-                            before_corr = text
-                            result = self._phonetic_corrector.correct(text)
-                            text = result.corrected_text
-                            if text != before_corr:
-                                logger.info(f"[PARTIAL #{process_count}] 🔊 Phonetic: '{before_corr}' → '{text}'")
+                                if result and result.text.strip():
+                                    text = self._apply_corrections(result.text.strip(), process_count, "PARTIAL")
+                                    self._partial_text = text
+                                    logger.info(f"[PARTIAL #{process_count}] 🎤 '{text}' ({whisper_time:.2f}s)")
+                                    if self.on_partial:
+                                        self.on_partial(text)
+                                else:
+                                    if self.on_partial:
+                                        self.on_partial("")
 
-                        self._partial_text = text
-                        if self.on_partial:
-                            self.on_partial(text)
+                    else:
+                        # === Single-Pass処理 ===
+                        t0 = time.time()
+                        result = self._engine.transcribe_audio(current_audio, beam_size=partial_beam)
+                        whisper_time = time.time() - t0
+
+                        if result and result.text.strip():
+                            text = self._apply_corrections(result.text.strip(), process_count, "PARTIAL")
+                            self._partial_text = text
+                            logger.info(f"[PARTIAL #{process_count}] 🎤 '{text}' ({whisper_time:.2f}s)")
+                            if self.on_partial:
+                                self.on_partial(text)
+
                     self._last_processed_samples = current_samples
                 except Exception as e:
                     logger.error(f"Processing error: {e}")
 
         logger.debug(f"_process_loop ended, total processes: {process_count}")
 
+    def _detect_speech(self, audio: np.ndarray) -> bool:
+        """VADで音声区間を検出"""
+        if len(audio) < 480:  # 30ms未満は無視
+            return self._last_vad_speech
+
+        # AudioPreprocessor の VADFilter を使用
+        if self._preprocessor and self._preprocessor.vad and self._preprocessor.vad.enabled:
+            try:
+                is_speech = self._preprocessor.vad.is_speech(audio)
+                self._last_vad_speech = is_speech
+                return is_speech
+            except Exception as e:
+                logger.debug(f"VAD error: {e}")
+
+        # フォールバック: 音量ベースの検出（VADが使えない場合）
+        rms = np.sqrt(np.mean(audio ** 2))
+        # 閾値を低めに設定（マイク感度に依存）
+        # 0.005 = かなり静か、0.01 = 普通の発話、0.02 = はっきりした発話
+        threshold = 0.003
+        is_speech = rms > threshold
+        if is_speech != self._last_vad_speech:
+            logger.debug(f"[VAD-Fallback] RMS={rms:.4f}, threshold={threshold}, speech={is_speech}")
+        self._last_vad_speech = is_speech
+        return is_speech
+
+    def _apply_corrections(self, text: str, process_count: int, prefix: str) -> str:
+        """辞書と音声認識誤り訂正を適用"""
+        # 辞書適用
+        if self._dictionary:
+            before_dict = text
+            text = self._dictionary.apply(text)
+            if text != before_dict:
+                logger.debug(f"[{prefix} #{process_count}] 📖 Dictionary: '{before_dict}' → '{text}'")
+
+        # 音声認識誤り訂正
+        if self._phonetic_corrector:
+            before_corr = text
+            result = self._phonetic_corrector.correct(text)
+            text = result.corrected_text
+            if text != before_corr:
+                logger.debug(f"[{prefix} #{process_count}] 🔊 Phonetic: '{before_corr}' → '{text}'")
+
+        return text
+
+    def _find_confirm_position(self, text: str) -> int:
+        """確定可能な位置を見つける（句読点や助詞の後）"""
+        # 日本語の句読点・区切り文字
+        delimiters = ['。', '、', '？', '！', '．', '，', '?', '!', '.', ',', '　', ' ']
+        # 日本語の助詞（文節の区切りになりやすい）
+        particles = ['は', 'が', 'を', 'に', 'で', 'と', 'の', 'へ', 'から', 'まで', 'より', 'って', 'ね', 'よ', 'さ']
+
+        best_pos = 0
+
+        # 句読点を優先的に探す
+        for i, char in enumerate(text):
+            if char in delimiters:
+                best_pos = i + 1
+
+        # 句読点がなければ、助詞の後を探す（最低5文字以上）
+        if best_pos == 0 and len(text) >= 5:
+            for particle in particles:
+                pos = text.rfind(particle)
+                if pos > 3:  # 最低3文字は確保
+                    candidate = pos + len(particle)
+                    if candidate > best_pos and candidate < len(text) - 2:  # 末尾2文字は残す
+                        best_pos = candidate
+
+        return best_pos
+
     def stop(self) -> str:
-        """録音停止して最終テキストを返す"""
+        """録音停止して最終テキストを返す（未確定部分のみ処理）"""
         if not self._is_recording:
             return ""
 
@@ -508,47 +739,58 @@ class VoiceInputSession:
             self._process_thread.join(timeout=1.0)
         logger.debug("Threads finished")
 
-        # 最終処理：バッファ全体を一括で文字起こし
-        final_text = ""
+        # Two-Pass有効時は高精度なbeam searchで未確定部分のみ処理
+        if self.config.two_pass:
+            beam_size = self.config.final_beam_size
+            logger.info(f"[Two-Pass] Final: beam_size={beam_size} (高精度)")
+        else:
+            beam_size = None
+            logger.info("[Single-Pass] Final transcription")
+
+        # 最終処理：未確定部分のみ処理（確定済み部分は再処理しない）
+        final_text = self._confirmed_text  # 確定済みテキストはそのまま保持（再補正しない）
+        remaining_text = ""
+
         if self._audio_buffer:
             full_audio = np.concatenate(self._audio_buffer)
-            total_duration = len(full_audio) / 16000
-            logger.info(f"[FINAL] 🎙️ Audio: {total_duration:.1f}s ({len(full_audio)} samples)")
+            total_samples = len(full_audio)
+            remaining_samples = total_samples - self._confirmed_samples
 
-            if len(full_audio) > 1600:  # 0.1秒以上の音声がある場合
+            logger.info(f"[FINAL] 🎙️ Total: {total_samples/16000:.1f}s, Confirmed: {self._confirmed_samples/16000:.1f}s, Remaining: {remaining_samples/16000:.1f}s")
+
+            # 未確定部分がある場合のみ処理
+            if remaining_samples > 1600:  # 0.1秒以上の未確定音声がある場合
+                remaining_audio = full_audio[self._confirmed_samples:]
                 try:
                     t0 = time.time()
-                    result = self._engine.transcribe_audio(full_audio)
-                    logger.info(f"[FINAL] ⏱️ Whisper処理時間: {time.time()-t0:.2f}s")
+                    # 確定テキストをコンテキストとして渡す（精度向上）
+                    prompt = self._confirmed_text if self._confirmed_text else None
+                    result = self._engine.transcribe_audio(remaining_audio, beam_size=beam_size, initial_prompt=prompt)
+                    whisper_time = time.time() - t0
+                    logger.info(f"[FINAL] ⏱️ Whisper処理時間: {whisper_time:.2f}s (beam_size={beam_size})")
                     if result and result.text.strip():
-                        final_text = result.text.strip()
-                        logger.info(f"[FINAL] 🎤 Whisper Raw: '{final_text}'")
+                        remaining_text = result.text.strip()
+                        logger.info(f"[FINAL] 🎤 Remaining text: '{remaining_text}'")
                 except Exception as e:
                     logger.error(f"[FINAL] ❌ Transcription error: {e}")
-                    final_text = self._partial_text
+                    remaining_text = self._partial_text
+            elif self._partial_text:
+                # 未確定音声が短い場合は部分結果を使用
+                remaining_text = self._partial_text
+                logger.info(f"[FINAL] ⚠️ Using partial text: '{remaining_text}'")
 
-        # 部分結果がある場合はそれを使用
+        # 残りテキストにのみ辞書・音声補正を適用（確定テキストは処理済みなので再適用しない）
+        if remaining_text:
+            remaining_text = self._apply_corrections(remaining_text, 0, "FINAL-STOP")
+
+        # 確定テキスト + 残りテキストを結合
+        if remaining_text:
+            final_text = final_text + remaining_text if final_text else remaining_text
+
+        # 部分結果がある場合はそれを使用（フォールバック）
         if not final_text:
             final_text = self._partial_text
-            logger.info(f"[FINAL] ⚠️ Using partial text: '{final_text}'")
-
-        # 辞書適用
-        if self._dictionary and final_text:
-            before_dict = final_text
-            final_text = self._dictionary.apply(final_text)
-            if final_text != before_dict:
-                logger.info(f"[FINAL] 📖 Dictionary: '{before_dict}' → '{final_text}'")
-
-        # 音声認識誤り訂正
-        if self._phonetic_corrector and final_text:
-            before_corr = final_text
-            correction_result = self._phonetic_corrector.correct(final_text)
-            final_text = correction_result.corrected_text
-            if final_text != before_corr:
-                logger.info(f"[FINAL] 🔊 Phonetic: '{before_corr}' → '{final_text}'")
-                if correction_result.corrections:
-                    for c in correction_result.corrections:
-                        logger.info(f"[FINAL]    └─ {c.get('type', '?')}: {c.get('description', '')}")
+            logger.info(f"[FINAL] ⚠️ Fallback to partial text: '{final_text}'")
 
         logger.info(f"[FINAL] ✅ Output: '{final_text}'")
 

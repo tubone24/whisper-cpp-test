@@ -35,6 +35,8 @@ class DictionaryConfig:
     replacements: list[ReplacementRule] = field(default_factory=list)
     # 文脈に応じた置換ルール
     context_rules: list[ContextRule] = field(default_factory=list)
+    # ハルシネーションフィルター（削除するパターン）
+    hallucination_filters: list[str] = field(default_factory=list)
 
 
 class Dictionary:
@@ -82,6 +84,11 @@ class Dictionary:
 
         result = text
 
+        # 0. ハルシネーションフィルターを適用（最初に処理）
+        for pattern in self.config.hallucination_filters:
+            compiled = self._compile_pattern(pattern, is_regex=True)
+            result = compiled.sub("", result)
+
         # 1. 文脈に応じた置換を適用（先に処理）
         for rule in self.config.context_rules:
             pattern = self._compile_pattern(rule.pattern)
@@ -96,7 +103,7 @@ class Dictionary:
             pattern = self._compile_pattern(rule.pattern, rule.is_regex)
             result = pattern.sub(rule.replacement, result)
 
-        return result
+        return result.strip()
 
     @classmethod
     def from_json(cls, json_path: Path) -> "Dictionary":
@@ -142,6 +149,9 @@ class Dictionary:
             )
             config.context_rules.append(rule)
 
+        # ハルシネーションフィルター
+        config.hallucination_filters = data.get("hallucination_filters", [])
+
         return cls(config)
 
     def to_dict(self) -> dict:
@@ -149,6 +159,7 @@ class Dictionary:
         data = {
             "replacements": [],
             "context_rules": [],
+            "hallucination_filters": self.config.hallucination_filters,
         }
 
         for rule in self.config.replacements:
@@ -206,6 +217,20 @@ def create_example_dictionary() -> dict:
                 "context_keywords": ["実験", "物質", "反応", "分子", "原子"],
                 "window_size": 50,
             },
+        ],
+        # ハルシネーションフィルター（Whisperが無音時に出力する定型文を削除）
+        "hallucination_filters": [
+            r"ご視聴ありがとうございま(す|した)。?",
+            r"チャンネル登録.*お願いします。?",
+            r"(ご|)チャンネル登録.*してね。?",
+            r"字幕[:：].*",
+            r"Thanks? for watching\.?",
+            r"Please subscribe.*",
+            r"See you (next time|in the next|later).*",
+            r"Bye[\s\-]?bye\.?",
+            r"お疲れ様でした。?",
+            r"ではまた。?",
+            r"^[\s　。、\.]+$",  # 空白や句読点のみ
         ],
     }
 

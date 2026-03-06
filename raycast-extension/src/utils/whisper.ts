@@ -32,6 +32,8 @@ export interface WhisperPreferences {
   processingStep: string;
   processingLength: string;
   enableVad: boolean;
+  vadThreshold: string;
+  utteranceSilence: string;
 }
 
 // Speaker colors for display (matching whisper-realtime's colors)
@@ -62,6 +64,24 @@ export interface StartOptions {
   processingStep?: number; // Processing step (ms)
   processingLength?: number; // Processing window length (ms)
   enableVad?: boolean; // VAD enable override
+  // voice-single用の追加オプション（長文対応）
+  voiceSingleStep?: number; // voice-single: 処理ステップ間隔 (ms)
+  voiceSingleLength?: number; // voice-single: 処理窓の長さ (ms)
+  voiceSingleKeep?: number; // voice-single: コンテキスト保持時間 (ms)
+  voiceSingleMaxTokens?: number; // voice-single: 最大トークン数
+  // Two-Pass処理（Zoom/Google Meet方式）
+  twoPass?: boolean; // 2段階処理を有効化
+  partialStep?: number; // Partial用: 処理間隔 (ms)
+  partialWindow?: number; // Partial用: 処理窓 (秒)
+  partialBeam?: number; // Partial用: beam_size (1=greedy)
+  finalBeam?: number; // Final用: beam_size (5=高精度)
+  // 音声前処理
+  sileroVad?: boolean; // Silero VAD（高精度VAD）
+  vadThreshold?: number; // VAD検出閾値 (0.0-1.0)
+  noiseReduction?: boolean; // DeepFilterNetノイズ除去（高ノイズ環境向け）
+  // Utterance検出設定
+  utteranceSilence?: number; // 発話終了とみなす無音時間（秒）
+  minUtterance?: number; // 最小発話時間（秒）
 }
 
 export class WhisperRealtimeProcess extends EventEmitter {
@@ -71,9 +91,39 @@ export class WhisperRealtimeProcess extends EventEmitter {
   private currentPartial: TranscriptionEntry | null = null;
   private recordingPath: string | null = null;
   private useVoiceSingle = false;
+  // タイムスタンプベースの確定処理用
+  private confirmedText = ""; // 確定済みテキスト（FINALで上書き更新）
+  private partialText = ""; // 暫定テキスト（PARTIALで更新）
 
   constructor() {
     super();
+  }
+
+  // タイムスタンプベース確定処理用: 確定テキスト + 暫定テキストをエントリとして返す
+  private getTimestampBasedEntries(): TranscriptionEntry[] {
+    const result: TranscriptionEntry[] = [];
+
+    // 確定済みテキスト（太字表示用）
+    if (this.confirmedText) {
+      result.push({
+        speaker: "",
+        text: this.confirmedText,
+        timestamp: 0,
+        isFinal: true,
+      });
+    }
+
+    // 暫定テキスト（通常表示用）
+    if (this.partialText) {
+      result.push({
+        speaker: "",
+        text: this.partialText,
+        timestamp: 0,
+        isFinal: false,
+      });
+    }
+
+    return result;
   }
 
   start(options?: StartOptions | string): void {
@@ -110,6 +160,54 @@ export class WhisperRealtimeProcess extends EventEmitter {
       if (opts.deviceId !== undefined) {
         args.push("--device", opts.deviceId.toString());
       }
+
+      // voice-single用の処理パラメータ（長文対応）
+      const step = opts.voiceSingleStep ?? 500;
+      const length = opts.voiceSingleLength ?? 10000; // デフォルト10秒で長文対応
+      const keep = opts.voiceSingleKeep ?? 500;
+      const maxTokens = opts.voiceSingleMaxTokens ?? 128;
+
+      args.push("--step", step.toString());
+      args.push("--length", length.toString());
+      args.push("--keep", keep.toString());
+      args.push("--max-tokens", maxTokens.toString());
+
+      // Two-Pass処理（Zoom/Google Meet方式）
+      const twoPass = opts.twoPass ?? true; // デフォルト有効
+      if (twoPass) {
+        args.push("--two-pass");
+        const partialStep = opts.partialStep ?? 100;
+        const partialWindow = opts.partialWindow ?? 5.0;
+        const partialBeam = opts.partialBeam ?? 1;
+        const finalBeam = opts.finalBeam ?? 5;
+        args.push("--partial-step", partialStep.toString());
+        args.push("--partial-window", partialWindow.toString());
+        args.push("--partial-beam", partialBeam.toString());
+        args.push("--final-beam", finalBeam.toString());
+      } else {
+        args.push("--no-two-pass");
+      }
+
+      // 音声前処理（Silero VAD + DeepFilterNet）
+      const sileroVad = opts.sileroVad ?? true; // デフォルト有効
+      if (sileroVad) {
+        args.push("--silero-vad");
+        const vadThreshold = opts.vadThreshold ?? 0.5;
+        args.push("--vad-threshold", vadThreshold.toString());
+      } else {
+        args.push("--no-silero-vad");
+      }
+
+      const noiseReduction = opts.noiseReduction ?? false; // デフォルト無効
+      if (noiseReduction) {
+        args.push("--noise-reduction");
+      }
+
+      // Utterance検出設定（発話単位での確定）
+      const utteranceSilence = opts.utteranceSilence ?? 0.8;
+      const minUtterance = opts.minUtterance ?? 0.3;
+      args.push("--utterance-silence", utteranceSilence.toString());
+      args.push("--min-utterance", minUtterance.toString());
     } else {
       // Use start command with JSON output (for transcription mode)
       args = [
@@ -198,6 +296,9 @@ export class WhisperRealtimeProcess extends EventEmitter {
     this.isRunning = true;
     this.entries = [];
     this.currentPartial = null;
+    // タイムスタンプベース確定処理用もリセット
+    this.confirmedText = "";
+    this.partialText = "";
 
     // For voice-single mode, emit recording status immediately
     if (useVoiceSingle) {
@@ -230,7 +331,13 @@ export class WhisperRealtimeProcess extends EventEmitter {
               this.emit("spectrum", spectrum);
             }
           } else if (line.startsWith("PARTIAL:")) {
-            const text = line.substring(8);
+            // PARTIAL: 暫定テキスト（確定境界より後の部分）
+            let text = line.substring(8);
+            // 確定テキストで始まっている場合は除去（重複防止）
+            if (this.confirmedText && text.startsWith(this.confirmedText)) {
+              text = text.substring(this.confirmedText.length);
+            }
+            this.partialText = text; // 上書き更新
             this.currentPartial = {
               speaker: "",
               text,
@@ -238,20 +345,30 @@ export class WhisperRealtimeProcess extends EventEmitter {
               isFinal: false,
             };
             this.emit("partial", this.currentPartial);
-            this.emit("update", this.getAllEntries());
+            // タイムスタンプベースのエントリを返す
+            this.emit("update", this.getTimestampBasedEntries());
           } else if (line.startsWith("FINAL:")) {
+            // FINAL: 確定テキスト（確定境界までの高精度書き起こし）
             const text = line.substring(6);
             if (text) {
+              // 確定テキストを保護（短縮は許可しない、追記のみ）
+              if (text.length >= this.confirmedText.length) {
+                this.confirmedText = text;
+              }
+              // partialTextをクリア（確定テキストの安定表示のため）
+              this.partialText = "";
               const entry: TranscriptionEntry = {
                 speaker: "",
-                text,
+                text: this.confirmedText,
                 timestamp: 0,
                 isFinal: true,
               };
-              this.entries.push(entry);
+              // 従来のentries配列も更新（互換性のため）
+              this.entries = [entry];
               this.currentPartial = null;
               this.emit("final", entry);
-              this.emit("update", this.getAllEntries());
+              // タイムスタンプベースのエントリを返す
+              this.emit("update", this.getTimestampBasedEntries());
             }
           }
           // Emit recording status when we receive first output
@@ -281,7 +398,12 @@ export class WhisperRealtimeProcess extends EventEmitter {
         for (const line of lines) {
           if (line.includes("PARTIAL:")) {
             const idx = line.indexOf("PARTIAL:");
-            const text = line.substring(idx + 8);
+            let text = line.substring(idx + 8);
+            // 確定テキストで始まっている場合は除去（重複防止）
+            if (this.confirmedText && text.startsWith(this.confirmedText)) {
+              text = text.substring(this.confirmedText.length);
+            }
+            this.partialText = text; // 上書き更新
             this.currentPartial = {
               speaker: "",
               text,
@@ -289,21 +411,27 @@ export class WhisperRealtimeProcess extends EventEmitter {
               isFinal: false,
             };
             this.emit("partial", this.currentPartial);
-            this.emit("update", this.getAllEntries());
+            this.emit("update", this.getTimestampBasedEntries());
           } else if (line.includes("FINAL:")) {
             const idx = line.indexOf("FINAL:");
             const text = line.substring(idx + 6);
             if (text) {
+              // 確定テキストを保護（短縮は許可しない、追記のみ）
+              if (text.length >= this.confirmedText.length) {
+                this.confirmedText = text;
+              }
+              // partialTextをクリア（確定テキストの安定表示のため）
+              this.partialText = "";
               const entry: TranscriptionEntry = {
                 speaker: "",
-                text,
+                text: this.confirmedText,
                 timestamp: 0,
                 isFinal: true,
               };
-              this.entries.push(entry);
+              this.entries = [entry];
               this.currentPartial = null;
               this.emit("final", entry);
-              this.emit("update", this.getAllEntries());
+              this.emit("update", this.getTimestampBasedEntries());
             }
           }
         }
@@ -426,6 +554,18 @@ export class WhisperRealtimeProcess extends EventEmitter {
   }
 
   getFullText(includePartial = true): string {
+    // voice-singleモードの場合はタイムスタンプベースのテキストを使用
+    if (this.useVoiceSingle) {
+      if (includePartial) {
+        // 確定テキスト + 暫定テキスト
+        return this.confirmedText + this.partialText;
+      } else {
+        // 確定テキストのみ
+        return this.confirmedText;
+      }
+    }
+
+    // 従来モード（startコマンド）
     const entries = includePartial ? this.getAllEntries() : this.entries;
     const preferences = getPreferenceValues<WhisperPreferences>();
 
@@ -442,6 +582,9 @@ export class WhisperRealtimeProcess extends EventEmitter {
   clear(): void {
     this.entries = [];
     this.currentPartial = null;
+    // タイムスタンプベース確定処理用もリセット
+    this.confirmedText = "";
+    this.partialText = "";
   }
 
   getRecordingPath(): string | null {

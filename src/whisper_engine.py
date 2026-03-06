@@ -180,8 +180,21 @@ class WhisperEngine:
             else:
                 self._buffer.clear()
 
-    def transcribe_audio(self, audio: np.ndarray) -> Optional[TranscriptionResult]:
-        """音声データを文字起こし"""
+    def transcribe_audio(
+        self,
+        audio: np.ndarray,
+        beam_size: Optional[int] = None,
+        best_of: Optional[int] = None,
+        initial_prompt: Optional[str] = None,
+    ) -> Optional[TranscriptionResult]:
+        """音声データを文字起こし
+
+        Args:
+            audio: 音声データ (16kHz, float32)
+            beam_size: beam searchのサイズ (1=greedy, 5=高精度)
+            best_of: 候補数 (1=高速, 5=高精度)
+            initial_prompt: 確定済みテキスト（コンテキストとしてwhisperに渡す）
+        """
         if len(audio) == 0:
             return None
 
@@ -204,6 +217,19 @@ class WhisperEngine:
                 "-nt",  # no timestamps
                 "-np",  # no prints (progress等を抑制)
             ]
+
+            # beam_size と best_of を設定（指定がなければconfigのデフォルト）
+            bs = beam_size if beam_size is not None else self.config.beam_size
+            bo = best_of if best_of is not None else bs  # best_ofはbeam_sizeと同じがデフォルト
+            cmd.extend(["-bs", str(bs)])
+            cmd.extend(["-bo", str(bo)])
+
+            # initial_prompt: 確定済みテキストをコンテキストとしてwhisperに渡す
+            # トークン制限（n_text_ctx/2 ≈ 224トークン）を超えないよう末尾のみ使用
+            if initial_prompt:
+                # 日本語は1文字≈1-2トークン、安全マージンで最大100文字に制限
+                truncated_prompt = initial_prompt[-100:] if len(initial_prompt) > 100 else initial_prompt
+                cmd.extend(["--prompt", truncated_prompt])
 
             if self.config.translate:
                 cmd.append("--translate")
@@ -238,13 +264,16 @@ class WhisperEngine:
                         is_final=True,
                     )
             else:
-                # エラー時はstderrを確認
+                # エラー時はstderrにログ出力（stdoutに書くとSIGPIPEの原因になる）
                 if result.stderr:
-                    print(f"whisper.cpp error: {result.stderr[:200]}")
+                    import logging
+                    logging.getLogger('whisper_engine').warning(f"whisper.cpp error: {result.stderr[:200]}")
         except subprocess.TimeoutExpired:
-            print("Transcription timeout (30s)")
+            import logging
+            logging.getLogger('whisper_engine').warning("Transcription timeout (30s)")
         except Exception as e:
-            print(f"Transcription error: {e}")
+            import logging
+            logging.getLogger('whisper_engine').error(f"Transcription error: {e}")
         finally:
             os.unlink(temp_path)
 

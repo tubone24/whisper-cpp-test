@@ -28,6 +28,7 @@ export interface DictionaryData {
   simple: Record<string, string>;
   replacements: ReplacementRule[];
   context_rules: ContextRule[];
+  hallucination_filters: string[];
 }
 
 // Display type for unified list view
@@ -86,6 +87,20 @@ function createExampleDictionary(): DictionaryData {
         window_size: 100,
       },
     ],
+    // ハルシネーションフィルター（Whisperが無音時に出力する定型文を削除）
+    hallucination_filters: [
+      "ご視聴ありがとうございま(す|した)。?",
+      "チャンネル登録.*お願いします。?",
+      "(ご|)チャンネル登録.*してね。?",
+      "字幕[:：].*",
+      "Thanks? for watching\\.?",
+      "Please subscribe.*",
+      "See you (next time|in the next|later).*",
+      "Bye[\\s\\-]?bye\\.?",
+      "お疲れ様でした。?",
+      "ではまた。?",
+      "^[\\s　。、\\.]+$",
+    ],
   };
 }
 
@@ -101,6 +116,7 @@ function ensureIds(data: Partial<DictionaryData>): DictionaryData {
       ...r,
       id: r.id || generateId(),
     })),
+    hallucination_filters: data.hallucination_filters || [],
   };
   return result;
 }
@@ -158,6 +174,7 @@ export async function saveDictionary(data: DictionaryData): Promise<void> {
           window_size,
         }),
       ),
+      hallucination_filters: data.hallucination_filters,
     };
 
     await writeFile(
@@ -356,4 +373,58 @@ export function getTypeIcon(type: DictionaryEntryType): string {
     case "context":
       return "doc-on-clipboard";
   }
+}
+
+// Apply dictionary to text (including hallucination filter)
+export function applyDictionary(text: string, data: DictionaryData): string {
+  if (!text) return text;
+
+  let result = text;
+
+  // 0. Apply hallucination filters first
+  for (const pattern of data.hallucination_filters) {
+    try {
+      const regex = new RegExp(pattern, "g");
+      result = result.replace(regex, "");
+    } catch {
+      // Invalid regex, skip
+      console.warn(`Invalid hallucination filter pattern: ${pattern}`);
+    }
+  }
+
+  // 1. Apply simple replacements
+  for (const [pattern, replacement] of Object.entries(data.simple)) {
+    result = result.split(pattern).join(replacement);
+  }
+
+  // 2. Apply replacement rules
+  for (const rule of data.replacements) {
+    try {
+      if (rule.is_regex) {
+        const regex = new RegExp(rule.pattern, "g");
+        result = result.replace(regex, rule.replacement);
+      } else {
+        result = result.split(rule.pattern).join(rule.replacement);
+      }
+    } catch {
+      // Invalid regex, skip
+      console.warn(`Invalid replacement pattern: ${rule.pattern}`);
+    }
+  }
+
+  // 3. Apply context rules (simplified - just check if keywords exist anywhere in text)
+  for (const rule of data.context_rules) {
+    const hasPositiveContext =
+      rule.context_keywords.length === 0 ||
+      rule.context_keywords.some((kw) => result.includes(kw));
+    const hasNegativeContext = rule.negative_keywords.some((kw) =>
+      result.includes(kw),
+    );
+
+    if (hasPositiveContext && !hasNegativeContext) {
+      result = result.split(rule.pattern).join(rule.replacement);
+    }
+  }
+
+  return result.trim();
 }

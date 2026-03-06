@@ -274,37 +274,150 @@ class AudioCapture:
 
 
 class VADFilter:
-    """音声区間検出（VAD）フィルタ"""
+    """音声区間検出（VAD）フィルタ - Silero VAD使用（高精度）"""
 
-    def __init__(self, sample_rate: int = 16000, frame_duration_ms: int = 30, aggressiveness: int = 2):
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        threshold: float = 0.5,
+        min_speech_ratio: float = 0.3,
+        use_silero: bool = True,
+    ):
         """
         Args:
-            sample_rate: サンプルレート (8000, 16000, 32000, 48000)
-            frame_duration_ms: フレーム長 (10, 20, 30)
-            aggressiveness: 検出の積極性 (0-3, 高いほど厳格)
+            sample_rate: サンプルレート (16000推奨)
+            threshold: Silero VADの検出閾値 (0.0-1.0、高いほど厳格)
+            min_speech_ratio: 発話判定に必要な最小フレーム比率
+            use_silero: Silero VADを使用 (Falseの場合webrtcvadにフォールバック)
         """
         self.sample_rate = sample_rate
-        self.frame_duration_ms = frame_duration_ms
-        self.frame_size = int(sample_rate * frame_duration_ms / 1000)
+        self.threshold = threshold
+        self.min_speech_ratio = min_speech_ratio
         self.enabled = False
-        self.vad = None
+        self.use_silero = False
+        self.silero_model = None
+        self.silero_utils = None
+        self.vad = None  # webrtcvad fallback
+        self._chunk_size = 512 if sample_rate == 16000 else 256  # Silero要件
 
-        try:
-            import webrtcvad
-            self.vad = webrtcvad.Vad(aggressiveness)
-            self.enabled = True
-        except ImportError:
-            # webrtcvadはオプション - Apple Siliconでのビルドが難しい場合がある
-            pass
-        except Exception as e:
-            # webrtcvadのロードエラー
-            pass
+        # Silero VADを試みる（高精度）
+        if use_silero:
+            try:
+                import torch
+                # Silero VADをロード（キャッシュされる）
+                self.silero_model, utils = torch.hub.load(
+                    repo_or_dir='snakers4/silero-vad',
+                    model='silero_vad',
+                    trust_repo=True,
+                    verbose=False,
+                )
+                self.silero_utils = utils
+                self.use_silero = True
+                self.enabled = True
+                # 初期状態リセット
+                self.silero_model.reset_states()
+                print("[VAD] Silero VAD loaded (high accuracy)")
+            except Exception as e:
+                print(f"[VAD] Silero VAD not available: {e}")
+                print("[VAD] Falling back to webrtcvad...")
+
+        # webrtcvadにフォールバック
+        if not self.use_silero:
+            try:
+                import webrtcvad
+                self.vad = webrtcvad.Vad(2)  # aggressiveness=2
+                self.frame_duration_ms = 30
+                self.frame_size = int(sample_rate * self.frame_duration_ms / 1000)
+                self.enabled = True
+                print("[VAD] webrtcvad loaded (fallback)")
+            except ImportError:
+                print("[VAD] No VAD available - all audio will be processed")
+            except Exception as e:
+                print(f"[VAD] webrtcvad error: {e}")
+
+    def reset_states(self):
+        """Silero VADの内部状態をリセット（新しい音声ストリーム開始時に呼ぶ）"""
+        if self.use_silero and self.silero_model is not None:
+            try:
+                self.silero_model.reset_states()
+                self._states_reset = True
+            except Exception as e:
+                print(f"[VAD] Failed to reset states: {e}")
 
     def is_speech(self, audio: np.ndarray) -> bool:
         """音声データに発話が含まれているかチェック"""
         if not self.enabled:
             return True
 
+        if self.use_silero:
+            return self._is_speech_silero(audio)
+        else:
+            return self._is_speech_webrtc(audio)
+
+    def _is_speech_silero(self, audio: np.ndarray) -> bool:
+        """Silero VADで発話検出"""
+        import torch
+
+        # float32の1D配列を確保
+        audio = np.asarray(audio, dtype=np.float32).flatten()
+
+        # Silero VADは512サンプル（16kHz）または256サンプル（8kHz）単位で処理
+        chunk_size = self._chunk_size
+
+        if len(audio) < chunk_size:
+            # サンプル数が足りない場合はゼロパディング
+            padded = np.zeros(chunk_size, dtype=np.float32)
+            padded[:len(audio)] = audio
+            audio = padded
+
+        # チャンクごとに処理して、発話フレームの割合を計算
+        speech_frames = 0
+        total_frames = 0
+
+        try:
+            # 明示的に正確なチャンクサイズで分割
+            num_chunks = len(audio) // chunk_size
+
+            with torch.no_grad():
+                for chunk_idx in range(num_chunks):
+                    start = chunk_idx * chunk_size
+                    end = start + chunk_size
+                    chunk = audio[start:end]
+
+                    # チャンクサイズを厳密に検証
+                    if len(chunk) != chunk_size:
+                        print(f"[VAD] Skip: chunk size {len(chunk)} != {chunk_size}")
+                        continue
+
+                    # 正確に chunk_size 要素の1D tensorを作成
+                    chunk_tensor = torch.tensor(chunk, dtype=torch.float32)
+
+                    # モデルに渡す前に形状を確認（デバッグ）
+                    if chunk_tensor.shape[0] != chunk_size:
+                        print(f"[VAD] Error: tensor shape {chunk_tensor.shape} != ({chunk_size},)")
+                        continue
+
+                    # サンプルレートも確認
+                    sr = self.sample_rate
+
+                    speech_prob = self.silero_model(chunk_tensor, sr).item()
+                    if speech_prob >= self.threshold:
+                        speech_frames += 1
+                    total_frames += 1
+
+        except Exception as e:
+            # エラー時はフォールバック（RMSベース）
+            print(f"[VAD] Silero error: {e}, falling back to RMS")
+            rms = np.sqrt(np.mean(audio ** 2))
+            return rms > 0.003
+
+        # 発話フレームの割合が min_speech_ratio 以上なら発話と判定
+        if total_frames == 0:
+            return False
+        return (speech_frames / total_frames) >= self.min_speech_ratio
+
+    def _is_speech_webrtc(self, audio: np.ndarray) -> bool:
+        """webrtcvadで発話検出（フォールバック）"""
         # float32をint16に変換
         audio_int16 = (audio * 32767).astype(np.int16)
 
@@ -319,13 +432,153 @@ class VADFilter:
                 if self.vad.is_speech(frame.tobytes(), self.sample_rate):
                     speech_frames += 1
 
-        # 30%以上のフレームで発話検出されたらTrue
         if total_frames == 0:
             return False
-        return (speech_frames / total_frames) >= 0.3
+        return (speech_frames / total_frames) >= self.min_speech_ratio
 
     def filter_audio(self, audio: np.ndarray) -> Optional[np.ndarray]:
         """発話が含まれている場合のみ音声を返す"""
         if self.is_speech(audio):
             return audio
         return None
+
+    def get_speech_timestamps(self, audio: np.ndarray) -> list[dict]:
+        """音声データから発話区間のタイムスタンプを取得（Silero VADのみ）"""
+        if not self.use_silero:
+            # webrtcvadではタイムスタンプ取得非対応
+            return [{"start": 0, "end": len(audio)}] if self.is_speech(audio) else []
+
+        import torch
+        get_speech_timestamps = self.silero_utils[0]
+
+        audio_tensor = torch.from_numpy(audio.astype(np.float32))
+        timestamps = get_speech_timestamps(
+            audio_tensor,
+            self.silero_model,
+            sampling_rate=self.sample_rate,
+            threshold=self.threshold,
+        )
+        return timestamps
+
+    def extract_speech(self, audio: np.ndarray) -> np.ndarray:
+        """音声データから発話部分のみを抽出"""
+        timestamps = self.get_speech_timestamps(audio)
+        if not timestamps:
+            return np.array([], dtype=np.float32)
+
+        segments = []
+        for ts in timestamps:
+            segments.append(audio[ts["start"]:ts["end"]])
+
+        return np.concatenate(segments) if segments else np.array([], dtype=np.float32)
+
+
+class NoiseReducer:
+    """ノイズ除去フィルタ - DeepFilterNet使用（高品質・リアルタイム対応）"""
+
+    def __init__(self, sample_rate: int = 16000):
+        """
+        Args:
+            sample_rate: 入力サンプルレート (16000推奨、内部で48kHzに変換)
+        """
+        self.input_sample_rate = sample_rate
+        self.df_sample_rate = 48000  # DeepFilterNetは48kHz
+        self.enabled = False
+        self.model = None
+        self.df_state = None
+
+        try:
+            from df import enhance, init_df
+            self.model, self.df_state, _ = init_df()
+            self._enhance = enhance
+            self.enabled = True
+            print("[NoiseReducer] DeepFilterNet loaded (high quality)")
+        except ImportError:
+            print("[NoiseReducer] DeepFilterNet not available")
+            print("  Install: uv pip install 'whisper-realtime[enhanced]'")
+        except Exception as e:
+            print(f"[NoiseReducer] DeepFilterNet error: {e}")
+
+    def reduce_noise(self, audio: np.ndarray) -> np.ndarray:
+        """音声データからノイズを除去"""
+        if not self.enabled:
+            return audio
+
+        import torch
+        from scipy import signal
+
+        # 16kHz -> 48kHz にアップサンプリング
+        if self.input_sample_rate != self.df_sample_rate:
+            num_samples = int(len(audio) * self.df_sample_rate / self.input_sample_rate)
+            audio_48k = signal.resample(audio, num_samples)
+        else:
+            audio_48k = audio
+
+        # tensorに変換
+        audio_tensor = torch.from_numpy(audio_48k.astype(np.float32))
+
+        # ノイズ除去
+        enhanced = self._enhance(self.model, self.df_state, audio_tensor)
+
+        # numpy配列に戻す
+        if isinstance(enhanced, torch.Tensor):
+            enhanced = enhanced.numpy()
+
+        # 48kHz -> 16kHz にダウンサンプリング
+        if self.input_sample_rate != self.df_sample_rate:
+            num_samples = int(len(enhanced) * self.input_sample_rate / self.df_sample_rate)
+            enhanced = signal.resample(enhanced, num_samples)
+
+        return enhanced.astype(np.float32)
+
+
+class AudioPreprocessor:
+    """音声前処理パイプライン（VAD + ノイズ除去）"""
+
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        use_vad: bool = True,
+        use_noise_reduction: bool = False,
+        vad_threshold: float = 0.5,
+    ):
+        """
+        Args:
+            sample_rate: サンプルレート
+            use_vad: VADを使用するか
+            use_noise_reduction: ノイズ除去を使用するか（高ノイズ環境向け）
+            vad_threshold: VAD検出閾値
+        """
+        self.sample_rate = sample_rate
+        self.vad = VADFilter(sample_rate=sample_rate, threshold=vad_threshold) if use_vad else None
+        self.noise_reducer = NoiseReducer(sample_rate=sample_rate) if use_noise_reduction else None
+
+    def process(self, audio: np.ndarray) -> Optional[np.ndarray]:
+        """音声データを前処理
+
+        Returns:
+            処理後の音声データ。発話が検出されない場合はNone。
+        """
+        # 1. VADで発話チェック
+        if self.vad and not self.vad.is_speech(audio):
+            return None
+
+        # 2. ノイズ除去（オプション）
+        if self.noise_reducer and self.noise_reducer.enabled:
+            audio = self.noise_reducer.reduce_noise(audio)
+
+        return audio
+
+    def extract_speech_with_denoise(self, audio: np.ndarray) -> np.ndarray:
+        """音声データから発話部分を抽出し、ノイズ除去を適用"""
+        # 1. VADで発話区間を抽出
+        if self.vad:
+            audio = self.vad.extract_speech(audio)
+            if len(audio) == 0:
+                return audio
+
+        # 2. ノイズ除去
+        if self.noise_reducer and self.noise_reducer.enabled:
+            audio = self.noise_reducer.reduce_noise(audio)
+
+        return audio

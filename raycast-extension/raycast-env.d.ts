@@ -27,7 +27,11 @@ type ExtensionPreferences = {
   /** Processing Window (ms) - Processing window length in milliseconds - shorter means faster response (default: 3000) */
   "processingLength": string,
   /** Voice Activity Detection - Use VAD to filter out non-speech audio */
-  "enableVad": boolean
+  "enableVad": boolean,
+  /** VAD Threshold - Voice detection sensitivity (0.0-1.0). Higher = stricter, reduces hallucinations like 'ご視聴ありがとうございます'. Default: 0.5, Recommended: 0.6-0.7 */
+  "vadThreshold": "0.3" | "0.4" | "0.5" | "0.6" | "0.7" | "0.8",
+  /** Utterance Silence (sec) - Seconds of silence to confirm utterance end. Shorter = faster confirmation but may cut speech. Default: 0.8 */
+  "utteranceSilence": "0.3" | "0.5" | "0.6" | "0.8" | "1.0" | "1.5"
 }
 
 /** Preferences accessible in all the extension's commands */

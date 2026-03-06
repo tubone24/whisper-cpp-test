@@ -1288,6 +1288,87 @@ def dictionary_test(text: str, path: Optional[str]):
     default=True,
     help="Use ASR error correction (homophone disambiguation, katakana normalization, etc.)",
 )
+@click.option(
+    "--step", "-s",
+    type=int,
+    default=500,
+    help="Processing step interval in milliseconds (default: 500)",
+)
+@click.option(
+    "--length", "-L",
+    type=int,
+    default=10000,
+    help="Processing window length in milliseconds (default: 10000 for longer texts)",
+)
+@click.option(
+    "--keep", "-k",
+    type=int,
+    default=500,
+    help="Context keep duration in milliseconds (default: 500)",
+)
+@click.option(
+    "--max-tokens", "-t",
+    type=int,
+    default=128,
+    help="Maximum tokens per inference (default: 128 for longer texts)",
+)
+@click.option(
+    "--two-pass/--no-two-pass",
+    default=True,
+    help="Enable two-pass processing (Zoom/Google Meet style): fast partial + accurate final",
+)
+@click.option(
+    "--partial-step",
+    type=int,
+    default=100,
+    help="Partial processing step interval in milliseconds (default: 100)",
+)
+@click.option(
+    "--partial-window",
+    type=float,
+    default=5.0,
+    help="Partial processing window in seconds (default: 5.0)",
+)
+@click.option(
+    "--partial-beam",
+    type=int,
+    default=1,
+    help="Beam size for partial results (default: 1 = greedy, fast)",
+)
+@click.option(
+    "--final-beam",
+    type=int,
+    default=5,
+    help="Beam size for final results (default: 5 = accurate)",
+)
+@click.option(
+    "--silero-vad/--no-silero-vad",
+    default=True,
+    help="Use Silero VAD for high-accuracy voice detection (reduces hallucinations)",
+)
+@click.option(
+    "--vad-threshold",
+    type=float,
+    default=0.5,
+    help="VAD detection threshold (0.0-1.0, higher = stricter)",
+)
+@click.option(
+    "--noise-reduction/--no-noise-reduction",
+    default=False,
+    help="Enable DeepFilterNet noise reduction (for noisy environments)",
+)
+@click.option(
+    "--utterance-silence",
+    type=float,
+    default=0.8,
+    help="Silence duration to end utterance (default: 0.8s)",
+)
+@click.option(
+    "--min-utterance",
+    type=float,
+    default=0.3,
+    help="Minimum utterance duration (default: 0.3s)",
+)
 def voice_single(
     model: str,
     language: str,
@@ -1295,6 +1376,20 @@ def voice_single(
     dictionary: bool,
     dictionary_path: Optional[str],
     phonetic: bool,
+    step: int,
+    length: int,
+    keep: int,
+    max_tokens: int,
+    two_pass: bool,
+    partial_step: int,
+    partial_window: float,
+    partial_beam: int,
+    final_beam: int,
+    silero_vad: bool,
+    vad_threshold: float,
+    noise_reduction: bool,
+    utterance_silence: float,
+    min_utterance: float,
 ):
     """
     Single-shot voice input mode (for external app integration)
@@ -1318,6 +1413,14 @@ def voice_single(
     logger.info(f"  Language: {language}")
     logger.info(f"  Dictionary: {dictionary}")
     logger.info(f"  PhoneticCorrection: {phonetic}")
+    logger.info(f"  Step: {step}ms, Length: {length}ms, Keep: {keep}ms, MaxTokens: {max_tokens}")
+    logger.info(f"  Two-Pass: {two_pass}")
+    if two_pass:
+        logger.info(f"    Partial: step={partial_step}ms, window={partial_window}s, beam={partial_beam}")
+        logger.info(f"    Final: beam={final_beam}")
+    logger.info(f"  Silero VAD: {silero_vad} (threshold={vad_threshold})")
+    logger.info(f"  Noise Reduction: {noise_reduction}")
+    logger.info(f"  Utterance: silence={utterance_silence}s, min={min_utterance}s")
 
     whisper_model = WhisperModel(model)
 
@@ -1330,6 +1433,23 @@ def voice_single(
         use_dictionary=dictionary,
         dictionary_path=Path(dictionary_path) if dictionary_path else None,
         use_phonetic_correction=phonetic,
+        step_ms=step,
+        length_ms=length,
+        keep_ms=keep,
+        max_tokens=max_tokens,
+        # Two-Pass設定
+        two_pass=two_pass,
+        partial_step_ms=partial_step,
+        partial_window_sec=partial_window,
+        partial_beam_size=partial_beam,
+        final_beam_size=final_beam,
+        # 音声前処理設定
+        use_silero_vad=silero_vad,
+        vad_threshold=vad_threshold,
+        use_noise_reduction=noise_reduction,
+        # Utterance検出設定
+        utterance_silence_sec=utterance_silence,
+        min_utterance_sec=min_utterance,
     )
 
     # 終了フラグ
@@ -1342,8 +1462,10 @@ def voice_single(
         print(f"PARTIAL:{text}", flush=True)
 
     def on_final(text: str):
-        """最終結果コールバック"""
-        pass  # stop時に処理
+        """最終結果コールバック（途中確定）"""
+        if text:
+            logger.debug(f"FINAL output: '{text[:50]}...' ({len(text)} chars)")
+            print(f"FINAL:{text}", flush=True)
 
     def on_level(level: float):
         """音声レベルコールバック"""
@@ -1362,6 +1484,8 @@ def voice_single(
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+    # SIGPIPEを無視（stdoutパイプが切れてもプロセスが死なないようにする）
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
     # セッション作成と録音開始
     logger.info("Creating VoiceInputSession...")
