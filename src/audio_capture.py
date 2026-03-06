@@ -298,6 +298,7 @@ class VADFilter:
         self.silero_model = None
         self.silero_utils = None
         self.vad = None  # webrtcvad fallback
+        self._chunk_size = 512 if sample_rate == 16000 else 256  # Silero要件
 
         # Silero VADを試みる（高精度）
         if use_silero:
@@ -313,6 +314,8 @@ class VADFilter:
                 self.silero_utils = utils
                 self.use_silero = True
                 self.enabled = True
+                # 初期状態リセット
+                self.silero_model.reset_states()
                 print("[VAD] Silero VAD loaded (high accuracy)")
             except Exception as e:
                 print(f"[VAD] Silero VAD not available: {e}")
@@ -332,6 +335,15 @@ class VADFilter:
             except Exception as e:
                 print(f"[VAD] webrtcvad error: {e}")
 
+    def reset_states(self):
+        """Silero VADの内部状態をリセット（新しい音声ストリーム開始時に呼ぶ）"""
+        if self.use_silero and self.silero_model is not None:
+            try:
+                self.silero_model.reset_states()
+                self._states_reset = True
+            except Exception as e:
+                print(f"[VAD] Failed to reset states: {e}")
+
     def is_speech(self, audio: np.ndarray) -> bool:
         """音声データに発話が含まれているかチェック"""
         if not self.enabled:
@@ -346,16 +358,63 @@ class VADFilter:
         """Silero VADで発話検出"""
         import torch
 
-        # float32のnumpy配列をtensorに変換
-        if audio.dtype != np.float32:
-            audio = audio.astype(np.float32)
+        # float32の1D配列を確保
+        audio = np.asarray(audio, dtype=np.float32).flatten()
 
-        audio_tensor = torch.from_numpy(audio)
+        # Silero VADは512サンプル（16kHz）または256サンプル（8kHz）単位で処理
+        chunk_size = self._chunk_size
 
-        # Silero VADで確率を取得
-        speech_prob = self.silero_model(audio_tensor, self.sample_rate).item()
+        if len(audio) < chunk_size:
+            # サンプル数が足りない場合はゼロパディング
+            padded = np.zeros(chunk_size, dtype=np.float32)
+            padded[:len(audio)] = audio
+            audio = padded
 
-        return speech_prob >= self.threshold
+        # チャンクごとに処理して、発話フレームの割合を計算
+        speech_frames = 0
+        total_frames = 0
+
+        try:
+            # 明示的に正確なチャンクサイズで分割
+            num_chunks = len(audio) // chunk_size
+
+            with torch.no_grad():
+                for chunk_idx in range(num_chunks):
+                    start = chunk_idx * chunk_size
+                    end = start + chunk_size
+                    chunk = audio[start:end]
+
+                    # チャンクサイズを厳密に検証
+                    if len(chunk) != chunk_size:
+                        print(f"[VAD] Skip: chunk size {len(chunk)} != {chunk_size}")
+                        continue
+
+                    # 正確に chunk_size 要素の1D tensorを作成
+                    chunk_tensor = torch.tensor(chunk, dtype=torch.float32)
+
+                    # モデルに渡す前に形状を確認（デバッグ）
+                    if chunk_tensor.shape[0] != chunk_size:
+                        print(f"[VAD] Error: tensor shape {chunk_tensor.shape} != ({chunk_size},)")
+                        continue
+
+                    # サンプルレートも確認
+                    sr = self.sample_rate
+
+                    speech_prob = self.silero_model(chunk_tensor, sr).item()
+                    if speech_prob >= self.threshold:
+                        speech_frames += 1
+                    total_frames += 1
+
+        except Exception as e:
+            # エラー時はフォールバック（RMSベース）
+            print(f"[VAD] Silero error: {e}, falling back to RMS")
+            rms = np.sqrt(np.mean(audio ** 2))
+            return rms > 0.003
+
+        # 発話フレームの割合が min_speech_ratio 以上なら発話と判定
+        if total_frames == 0:
+            return False
+        return (speech_frames / total_frames) >= self.min_speech_ratio
 
     def _is_speech_webrtc(self, audio: np.ndarray) -> bool:
         """webrtcvadで発話検出（フォールバック）"""

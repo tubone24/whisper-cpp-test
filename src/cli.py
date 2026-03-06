@@ -1357,6 +1357,18 @@ def dictionary_test(text: str, path: Optional[str]):
     default=False,
     help="Enable DeepFilterNet noise reduction (for noisy environments)",
 )
+@click.option(
+    "--utterance-silence",
+    type=float,
+    default=0.8,
+    help="Silence duration to end utterance (default: 0.8s)",
+)
+@click.option(
+    "--min-utterance",
+    type=float,
+    default=0.3,
+    help="Minimum utterance duration (default: 0.3s)",
+)
 def voice_single(
     model: str,
     language: str,
@@ -1376,6 +1388,8 @@ def voice_single(
     silero_vad: bool,
     vad_threshold: float,
     noise_reduction: bool,
+    utterance_silence: float,
+    min_utterance: float,
 ):
     """
     Single-shot voice input mode (for external app integration)
@@ -1406,6 +1420,7 @@ def voice_single(
         logger.info(f"    Final: beam={final_beam}")
     logger.info(f"  Silero VAD: {silero_vad} (threshold={vad_threshold})")
     logger.info(f"  Noise Reduction: {noise_reduction}")
+    logger.info(f"  Utterance: silence={utterance_silence}s, min={min_utterance}s")
 
     whisper_model = WhisperModel(model)
 
@@ -1432,6 +1447,9 @@ def voice_single(
         use_silero_vad=silero_vad,
         vad_threshold=vad_threshold,
         use_noise_reduction=noise_reduction,
+        # Utterance検出設定
+        utterance_silence_sec=utterance_silence,
+        min_utterance_sec=min_utterance,
     )
 
     # 終了フラグ
@@ -1466,6 +1484,8 @@ def voice_single(
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+    # SIGPIPEを無視（stdoutパイプが切れてもプロセスが死なないようにする）
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
     # セッション作成と録音開始
     logger.info("Creating VoiceInputSession...")

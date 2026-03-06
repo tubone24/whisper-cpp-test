@@ -33,6 +33,7 @@ export interface WhisperPreferences {
   processingLength: string;
   enableVad: boolean;
   vadThreshold: string;
+  utteranceSilence: string;
 }
 
 // Speaker colors for display (matching whisper-realtime's colors)
@@ -78,6 +79,9 @@ export interface StartOptions {
   sileroVad?: boolean; // Silero VAD（高精度VAD）
   vadThreshold?: number; // VAD検出閾値 (0.0-1.0)
   noiseReduction?: boolean; // DeepFilterNetノイズ除去（高ノイズ環境向け）
+  // Utterance検出設定
+  utteranceSilence?: number; // 発話終了とみなす無音時間（秒）
+  minUtterance?: number; // 最小発話時間（秒）
 }
 
 export class WhisperRealtimeProcess extends EventEmitter {
@@ -198,6 +202,12 @@ export class WhisperRealtimeProcess extends EventEmitter {
       if (noiseReduction) {
         args.push("--noise-reduction");
       }
+
+      // Utterance検出設定（発話単位での確定）
+      const utteranceSilence = opts.utteranceSilence ?? 0.8;
+      const minUtterance = opts.minUtterance ?? 0.3;
+      args.push("--utterance-silence", utteranceSilence.toString());
+      args.push("--min-utterance", minUtterance.toString());
     } else {
       // Use start command with JSON output (for transcription mode)
       args = [
@@ -341,11 +351,15 @@ export class WhisperRealtimeProcess extends EventEmitter {
             // FINAL: 確定テキスト（確定境界までの高精度書き起こし）
             const text = line.substring(6);
             if (text) {
-              // 確定テキストを上書き（追加ではない）
-              this.confirmedText = text;
+              // 確定テキストを保護（短縮は許可しない、追記のみ）
+              if (text.length >= this.confirmedText.length) {
+                this.confirmedText = text;
+              }
+              // partialTextをクリア（確定テキストの安定表示のため）
+              this.partialText = "";
               const entry: TranscriptionEntry = {
                 speaker: "",
-                text,
+                text: this.confirmedText,
                 timestamp: 0,
                 isFinal: true,
               };
@@ -402,11 +416,15 @@ export class WhisperRealtimeProcess extends EventEmitter {
             const idx = line.indexOf("FINAL:");
             const text = line.substring(idx + 6);
             if (text) {
-              // 確定テキストを上書き
-              this.confirmedText = text;
+              // 確定テキストを保護（短縮は許可しない、追記のみ）
+              if (text.length >= this.confirmedText.length) {
+                this.confirmedText = text;
+              }
+              // partialTextをクリア（確定テキストの安定表示のため）
+              this.partialText = "";
               const entry: TranscriptionEntry = {
                 speaker: "",
-                text,
+                text: this.confirmedText,
                 timestamp: 0,
                 isFinal: true,
               };

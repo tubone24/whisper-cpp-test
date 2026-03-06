@@ -201,6 +201,40 @@
           "value": "0.8"
         }
       ]
+    },
+    {
+      "name": "utteranceSilence",
+      "title": "Utterance Silence (sec)",
+      "description": "Seconds of silence to confirm utterance end. Shorter = faster confirmation but may cut speech. Default: 0.8",
+      "type": "dropdown",
+      "required": false,
+      "default": "0.8",
+      "data": [
+        {
+          "title": "0.3 (Very Fast)",
+          "value": "0.3"
+        },
+        {
+          "title": "0.5 (Fast)",
+          "value": "0.5"
+        },
+        {
+          "title": "0.6",
+          "value": "0.6"
+        },
+        {
+          "title": "0.8 (Default)",
+          "value": "0.8"
+        },
+        {
+          "title": "1.0 (Slow)",
+          "value": "1.0"
+        },
+        {
+          "title": "1.5 (Very Slow)",
+          "value": "1.5"
+        }
+      ]
     }
   ],
   "dependencies": {

@@ -155,9 +155,11 @@ export default function VoiceInput() {
           partialWindow: 20,
           partialBeam: 1, // greedy search（高速）
           finalBeam: 8, // beam search（高精度）
-          // 音声前処理こんにちは。交番駐在所からのお知らせ。詐欺語撲滅にご協力ください。ご協力ください。はい
-          noiseReduction: true, // DeepFilterNetノイズ除去（高ノイズ環境向け）
+          // 音声前処理
+          noiseReduction: false, // DeepFilterNetノイズ除去（FFmpeg必要、デフォルト無効）
           vadThreshold: parseFloat(preferences.vadThreshold || "0.5"), // VAD閾値（設定から取得）
+          // Utterance検出（発話確定）
+          utteranceSilence: parseFloat(preferences.utteranceSilence || "0.8"), // 無音判定時間（設定から取得）
         };
 
         process.start(startOptions);
